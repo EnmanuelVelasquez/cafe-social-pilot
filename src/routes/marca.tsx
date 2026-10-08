@@ -67,7 +67,7 @@ function Marca() {
             {pillars.map((p, i) => (
               <div key={p.name}>
                 <div className="mb-2 flex justify-between text-sm"><span className="font-medium">{p.name}</span><span className="font-semibold text-primary">{p.value}%</span></div>
-                <Slider value={[p.value]} max={100} step={5} onValueChange={([v]) => setPillars((ps) => ps.map((x, j) => (j === i ? { ...x, value: v } : x)))} />
+                <Slider value={[p.value]} max={100} step={5} onValueChange={([v = 0]) => setPillars((ps) => ps.map((x, j) => (j === i ? { ...x, value: v } : x)))} />
               </div>
             ))}
           </div>
