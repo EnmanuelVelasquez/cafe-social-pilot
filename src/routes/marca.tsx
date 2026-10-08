@@ -35,8 +35,8 @@ function Marca() {
   const total = pillars.reduce((a, p) => a + p.value, 0);
 
   const save = () => {
-    if (!rules.trim()) return toast.error("Las Reglas Negativas son obligatorias");
-    if (total !== 100) return toast.error(`Los pilares deben sumar 100% (actual: ${total}%)`);
+    if (!rules.trim()) { toast.error("Las Reglas Negativas son obligatorias"); return; }
+    if (total !== 100) { toast.error(`Los pilares deben sumar 100% (actual: ${total}%)`); return; }
     toast.success("Parámetros de marca guardados");
   };
 
