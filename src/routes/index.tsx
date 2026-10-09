@@ -90,7 +90,7 @@ function Dashboard() {
       <h2 className="mb-3 mt-8 font-display text-lg font-semibold">Próximas publicaciones</h2>
       <div className="space-y-3">
         {posts.map((p) => (
-          <article key={p.id} className="flex flex-col gap-4 rounded-2xl border bg-card p-4 shadow-card sm:flex-row">
+          <article key={p.id} className={`flex flex-col gap-4 rounded-2xl p-4 shadow-card sm:flex-row ${p.status === "pendiente" ? "border border-orange-200 bg-orange-50" : "border bg-card"}`}>
             <img src={p.img} alt={p.pillar} loading="lazy" width={816} height={816} className="aspect-square w-full rounded-xl object-cover sm:w-28" />
             <div className="min-w-0 flex-1">
               <div className="flex flex-wrap items-center gap-2 text-xs font-medium">
