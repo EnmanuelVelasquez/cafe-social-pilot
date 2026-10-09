@@ -51,6 +51,8 @@
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
+  --color-status-pending: var(--status-pending);
+  --color-status-pending-soft: var(--status-pending-soft);
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-display: "Sora", ui-sans-serif, system-ui, sans-serif;
   --color-input: var(--input);
@@ -90,6 +92,9 @@
   --success-soft: oklch(0.95 0.05 155);
   --warning: oklch(0.68 0.16 65);
   --warning-soft: oklch(0.96 0.06 80);
+  /* Amarillo cálido: badge de estado "Pendiente de Aprobación". */
+  --status-pending: oklch(0.52 0.14 70);
+  --status-pending-soft: oklch(0.95 0.09 92);
   --gradient-brand: linear-gradient(135deg, var(--primary), var(--violet));
   --shadow-card: 0 1px 2px oklch(0.2 0.04 265 / 6%), 0 8px 24px -12px oklch(0.2 0.04 265 / 12%);
   --shadow-glow: 0 10px 30px -10px color-mix(in oklab, var(--primary) 50%, transparent);
