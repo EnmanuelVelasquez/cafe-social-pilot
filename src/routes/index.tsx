@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck } from "lucide-react";
+import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { posts as initial, assets } from "@/lib/data";
 
 export const Route = createFileRoute("/")({
@@ -14,6 +16,8 @@ export const Route = createFileRoute("/")({
       { name: "description", content: "Aprueba y programa publicaciones generadas por IA para Instagram y Facebook." },
       { property: "og:title", content: "Dashboard de Contenido — AutoSocial AI" },
       { property: "og:description", content: "Aprueba y programa publicaciones generadas por IA para Instagram y Facebook." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: Dashboard,
