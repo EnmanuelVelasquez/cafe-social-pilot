@@ -26,6 +26,7 @@ export const Route = createFileRoute("/")({
 function Dashboard() {
   const [posts, setPosts] = useState(initial);
   const [auto, setAuto] = useState(false);
+  const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   const scheduled = posts.filter((p) => p.status === "programado").length;
 
   const approve = (id: number) => {
@@ -36,6 +37,21 @@ function Dashboard() {
     setAuto(v);
     if (v) setPosts((ps) => ps.map((p) => ({ ...p, status: "programado" })));
     toast(v ? "Modo Autónomo activado" : "Modo Supervisado activado");
+  };
+  const openEdit = (id: number) => {
+    const post = posts.find((p) => p.id === id);
+    if (post) setEditing({ id, draft: post.copy });
+  };
+  const saveCopy = () => {
+    if (!editing) return;
+    const text = editing.draft.trim();
+    if (!text) {
+      toast.error("El texto no puede quedar vacío");
+      return;
+    }
+    setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text } : p)));
+    setEditing(null);
+    toast.success("Texto actualizado");
   };
 
   const stats = [
