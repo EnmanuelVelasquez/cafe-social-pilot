@@ -3,6 +3,7 @@ import { useState } from "react";
 import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -98,9 +99,12 @@ function Dashboard() {
                 </span>
                 <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1"><Clock className="h-3.5 w-3.5" />{p.when}</span>
                 <span className="rounded-full bg-violet-soft px-2.5 py-1 text-violet">{p.pillar}</span>
-                <span className={`rounded-full px-2.5 py-1 ${p.status === "pendiente" ? "bg-warning-soft text-warning" : "bg-success-soft text-success"}`}>
+                <Badge
+                  variant={p.status === "pendiente" ? "pending" : "scheduled"}
+                  className="rounded-full px-2.5 py-1"
+                >
                   {p.status === "pendiente" ? "Pendiente de Aprobación" : "Programado"}
-                </span>
+                </Badge>
               </div>
               <p className="mt-3 text-sm leading-relaxed">{p.copy}</p>
             </div>
