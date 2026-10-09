@@ -15,11 +15,13 @@ const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(mi
 export function setPillarValue(pillars: Pillar[], index: number, value: number): Pillar[] {
   if (pillars.length === 0) return pillars;
   if (index < 0 || index >= pillars.length) return pillars;
-  if (pillars.length === 1) return [{ ...pillars[0], value: TOTAL_SHARE }];
+  if (pillars.length === 1) return pillars.map((p) => ({ ...p, value: TOTAL_SHARE }));
 
   const target = clamp(Math.round(value), 0, TOTAL_SHARE);
   const remaining = TOTAL_SHARE - target;
-  const others = pillars.filter((_, i) => i !== index).map((p) => clamp(Math.round(p.value), 0, TOTAL_SHARE));
+  const others = pillars
+    .filter((_, i) => i !== index)
+    .map((p) => clamp(Math.round(p.value), 0, TOTAL_SHARE));
   const othersTotal = others.reduce((a, b) => a + b, 0);
 
   // Reparto proporcional al peso actual; si nadie tiene peso, se reparte a partes iguales.
@@ -31,14 +33,12 @@ export function setPillarValue(pillars: Pillar[], index: number, value: number):
     .sort((a, b) => b.frac - a.frac || a.i - b.i);
   for (const { i } of byFraction) {
     if (drift <= 0) break;
-    shares[i] += 1;
+    shares[i] = (shares[i] ?? 0) + 1;
     drift -= 1;
   }
 
   let next = -1;
-  return pillars.map((p, i) => {
-    if (i === index) return { ...p, value: target };
-    next += 1;
-    return { ...p, value: shares[next] };
-  });
+  return pillars.map((p, i) =>
+    i === index ? { ...p, value: target } : { ...p, value: shares[++next] ?? 0 },
+  );
 }

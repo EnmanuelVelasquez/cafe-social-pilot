@@ -32,9 +32,9 @@ describe("Pilares de contenido siempre suman 100%", () => {
     const up = setPillarValue(base, 0, 140);
     const down = setPillarValue(base, 0, -20);
 
-    expect(up[0].value).toBe(100);
+    expect(up.at(0)?.value).toBe(100);
     expect(total(up)).toBe(100);
-    expect(down[0].value).toBe(0);
+    expect(down.at(0)?.value).toBe(0);
     expect(total(down)).toBe(100);
   });
 
