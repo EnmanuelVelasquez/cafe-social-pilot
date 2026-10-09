@@ -33,3 +33,10 @@ export const assets: Asset[] = [
   { id: 7, img: a4, name: "Cerezas maduras", tags: ["#origen"], uses: 2 },
   { id: 8, img: a3, name: "Clientes felices", tags: ["#comunidad", "#ambiente"], uses: 4 },
 ];
+
+/** La IA se queda sin material fresco cuando quedan menos de este número de imágenes sin usar. */
+export const LOW_STOCK_THRESHOLD = 5;
+
+export const countUnused = (list: Asset[]) => list.filter((a) => a.uses === 0).length;
+
+export const isLowStock = (list: Asset[]) => countUnused(list) < LOW_STOCK_THRESHOLD;
