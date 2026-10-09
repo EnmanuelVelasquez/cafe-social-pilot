@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck } from "lucide-react";
+import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Textarea } from "@/components/ui/textarea";
 import { posts as initial, assets } from "@/lib/data";
 
 export const Route = createFileRoute("/")({
@@ -14,6 +16,8 @@ export const Route = createFileRoute("/")({
       { name: "description", content: "Aprueba y programa publicaciones generadas por IA para Instagram y Facebook." },
       { property: "og:title", content: "Dashboard de Contenido — AutoSocial AI" },
       { property: "og:description", content: "Aprueba y programa publicaciones generadas por IA para Instagram y Facebook." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: Dashboard,
@@ -22,6 +26,7 @@ export const Route = createFileRoute("/")({
 function Dashboard() {
   const [posts, setPosts] = useState(initial);
   const [auto, setAuto] = useState(false);
+  const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
   const scheduled = posts.filter((p) => p.status === "programado").length;
 
   const approve = (id: number) => {
@@ -32,6 +37,21 @@ function Dashboard() {
     setAuto(v);
     if (v) setPosts((ps) => ps.map((p) => ({ ...p, status: "programado" })));
     toast(v ? "Modo Autónomo activado" : "Modo Supervisado activado");
+  };
+  const openEdit = (id: number) => {
+    const post = posts.find((p) => p.id === id);
+    if (post) setEditing({ id, draft: post.copy });
+  };
+  const saveCopy = () => {
+    if (!editing) return;
+    const text = editing.draft.trim();
+    if (!text) {
+      toast.error("El texto no puede quedar vacío");
+      return;
+    }
+    setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text } : p)));
+    setEditing(null);
+    toast.success("Texto actualizado");
   };
 
   const stats = [
@@ -85,13 +105,42 @@ function Dashboard() {
               <p className="mt-3 text-sm leading-relaxed">{p.copy}</p>
             </div>
             {p.status === "pendiente" && (
-              <Button variant="brand" className="shrink-0 self-start sm:self-center" onClick={() => approve(p.id)}>
-                <CheckCircle2 /> Aprobar y Programar
-              </Button>
+              <div className="flex shrink-0 gap-2 self-start sm:self-center">
+                <Button variant="brand" onClick={() => approve(p.id)}>
+                  <CheckCircle2 /> Aprobar y Programar
+                </Button>
+                <Button variant="outline" onClick={() => openEdit(p.id)}>
+                  <Pencil /> Editar Copy
+                </Button>
+              </div>
             )}
           </article>
         ))}
       </div>
+
+      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar Copy</DialogTitle>
+            <DialogDescription>Ajusta el texto antes de programar la publicación.</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={editing?.draft ?? ""}
+            onChange={(e) => setEditing((prev) => (prev ? { ...prev, draft: e.target.value } : prev))}
+            rows={6}
+            maxLength={2200}
+            placeholder="Escribe el texto de la publicación…"
+            autoFocus
+          />
+          <p className="text-right text-xs text-muted-foreground">{editing?.draft.length ?? 0}/2200</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditing(null)}>Cancelar</Button>
+            <Button variant="brand" onClick={saveCopy}>
+              <CheckCircle2 /> Guardar y Programar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
