@@ -105,13 +105,42 @@ function Dashboard() {
               <p className="mt-3 text-sm leading-relaxed">{p.copy}</p>
             </div>
             {p.status === "pendiente" && (
-              <Button variant="brand" className="shrink-0 self-start sm:self-center" onClick={() => approve(p.id)}>
-                <CheckCircle2 /> Aprobar y Programar
-              </Button>
+              <div className="flex shrink-0 gap-2 self-start sm:self-center">
+                <Button variant="brand" onClick={() => approve(p.id)}>
+                  <CheckCircle2 /> Aprobar y Programar
+                </Button>
+                <Button variant="outline" onClick={() => openEdit(p.id)}>
+                  <Pencil /> Editar Copy
+                </Button>
+              </div>
             )}
           </article>
         ))}
       </div>
+
+      <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Editar Copy</DialogTitle>
+            <DialogDescription>Ajusta el texto antes de programar la publicación.</DialogDescription>
+          </DialogHeader>
+          <Textarea
+            value={editing?.draft ?? ""}
+            onChange={(e) => setEditing((prev) => (prev ? { ...prev, draft: e.target.value } : prev))}
+            rows={6}
+            maxLength={2200}
+            placeholder="Escribe el texto de la publicación…"
+            autoFocus
+          />
+          <p className="text-right text-xs text-muted-foreground">{editing?.draft.length ?? 0}/2200</p>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditing(null)}>Cancelar</Button>
+            <Button variant="brand" onClick={saveCopy}>
+              <CheckCircle2 /> Guardar y Programar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
