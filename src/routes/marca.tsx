@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
+import { setPillarValue, type Pillar } from "@/lib/brand";
 
 export const Route = createFileRoute("/marca")({
   head: () => ({
@@ -16,6 +17,8 @@ export const Route = createFileRoute("/marca")({
       { name: "description", content: "Define tono de voz, pilares de contenido y reglas negativas para tu marca." },
       { property: "og:title", content: "Brand Engine — AutoSocial AI" },
       { property: "og:description", content: "Define tono de voz, pilares de contenido y reglas negativas para tu marca." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: Marca,
@@ -26,7 +29,7 @@ const tones = ["Cercano", "Profesional", "Divertido", "Inspirador"];
 function Marca() {
   const [name, setName] = useState("Café Don Juan");
   const [tone, setTone] = useState("Cercano");
-  const [pillars, setPillars] = useState([
+  const [pillars, setPillars] = useState<Pillar[]>([
     { name: "Educativo", value: 40 },
     { name: "Venta", value: 30 },
     { name: "Estilo de vida", value: 30 },
@@ -67,7 +70,7 @@ function Marca() {
             {pillars.map((p, i) => (
               <div key={p.name}>
                 <div className="mb-2 flex justify-between text-sm"><span className="font-medium">{p.name}</span><span className="font-semibold text-primary">{p.value}%</span></div>
-                <Slider value={[p.value]} max={100} step={5} onValueChange={([v = 0]) => setPillars((ps) => ps.map((x, j) => (j === i ? { ...x, value: v } : x)))} />
+                <Slider value={[p.value]} max={100} step={5} onValueChange={([v = 0]) => setPillars((ps) => setPillarValue(ps, i, v))} />
               </div>
             ))}
           </div>
@@ -84,7 +87,7 @@ function Marca() {
           <Textarea id="rules" required rows={4} value={rules} onChange={(e) => setRules(e.target.value)} />
         </section>
 
-        <Button variant="brand" size="lg" className="h-14 w-full text-base" onClick={save}><Save /> Guardar Parámetros de Marca</Button>
+        <Button variant="cta" size="lg" className="h-14 w-full text-base" onClick={save}><Save /> Guardar Parámetros de Marca</Button>
       </div>
     </AppShell>
   );
