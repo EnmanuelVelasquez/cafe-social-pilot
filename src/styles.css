@@ -46,6 +46,7 @@
   --color-violet: var(--violet);
   --color-violet-soft: var(--violet-soft);
   --color-primary-soft: var(--primary-soft);
+  --color-cta: var(--cta);
   --color-success: var(--success);
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
@@ -83,6 +84,8 @@
   --violet: oklch(0.55 0.23 293);
   --violet-soft: oklch(0.95 0.04 293);
   --primary-soft: oklch(0.95 0.04 264);
+  /* Azul cobalto oscuro #1E3A8A: color del botón principal de conversión. */
+  --cta: oklch(0.379 0.138 265.5);
   --success: oklch(0.62 0.15 155);
   --success-soft: oklch(0.95 0.05 155);
   --warning: oklch(0.68 0.16 65);
@@ -125,6 +128,7 @@
   --popover-foreground: oklch(0.984 0.003 247.858);
   --primary: oklch(0.929 0.013 255.508);
   --primary-foreground: oklch(0.208 0.042 265.755);
+  --cta: oklch(0.45 0.16 265.5);
   --secondary: oklch(0.279 0.041 260.031);
   --secondary-foreground: oklch(0.984 0.003 247.858);
   --muted: oklch(0.279 0.041 260.031);
