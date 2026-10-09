@@ -1,10 +1,11 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
-import { Plus, Repeat } from "lucide-react";
+import { Plus, Repeat, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
-import { assets } from "@/lib/data";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { assets, countUnused, isLowStock } from "@/lib/data";
 
 export const Route = createFileRoute("/activos")({
   head: () => ({
@@ -13,6 +14,8 @@ export const Route = createFileRoute("/activos")({
       { name: "description", content: "Galería de imágenes con etiquetas automáticas y contador de uso." },
       { property: "og:title", content: "Biblioteca de Activos — AutoSocial AI" },
       { property: "og:description", content: "Galería de imágenes con etiquetas automáticas y contador de uso." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: Activos,
@@ -23,12 +26,26 @@ const allTags = ["Todos", ...Array.from(new Set(assets.flatMap((a) => a.tags)))]
 function Activos() {
   const [tag, setTag] = useState("Todos");
   const list = tag === "Todos" ? assets : assets.filter((a) => a.tags.includes(tag));
+  const unused = countUnused(assets);
   return (
     <AppShell
       title="Biblioteca de Activos"
       subtitle={`${assets.length} imágenes etiquetadas automáticamente por IA`}
       action={<Button variant="brand" size="lg" onClick={() => toast("Selector de archivos próximamente")}><Plus /> Subir Nuevos Activos</Button>}
     >
+      {isLowStock(assets) && (
+        <Alert variant="warning" className="mb-5 rounded-xl">
+          <TriangleAlert className="h-5 w-5" />
+          <AlertTitle className="text-warning">
+            {unused === 1
+              ? "Solo queda 1 imagen sin usar en el banco"
+              : `Solo quedan ${unused} imágenes sin usar en el banco`}
+          </AlertTitle>
+          <AlertDescription>
+            Sube nuevos activos para que la IA no repita las mismas fotos en tus próximas publicaciones.
+          </AlertDescription>
+        </Alert>
+      )}
       <div className="-mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-1">
         {allTags.map((t) => (
           <button key={t} onClick={() => setTag(t)} className={`shrink-0 rounded-full border px-4 py-1.5 text-sm font-medium transition ${tag === t ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"}`}>{t}</button>
