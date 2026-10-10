@@ -1,5 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { posts as initial, assets } from "@/lib/data";
+import { supabase } from "@/lib/supabase";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -24,41 +24,116 @@ export const Route = createFileRoute("/")({
   component: Dashboard,
 });
 
+// Definimos un tipo rápido para que TypeScript no se queje
+type PostData = {
+  id: string;
+  copy: string;
+  when: string;
+  network: string;
+  status: string;
+  img: string;
+  pillar: string;
+};
+
 function Dashboard() {
-  const [posts, setPosts] = useState(initial);
+  const [posts, setPosts] = useState<PostData[]>([]);
   const [auto, setAuto] = useState(false);
-  const [editing, setEditing] = useState<{ id: number; draft: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  
+  // Cargar datos reales de Supabase
+  useEffect(() => {
+    const fetchPosts = async () => {
+      const { data, error } = await supabase
+        .from('publicaciones')
+        .select(`
+          id, 
+          texto_copy, 
+          fecha_publicacion, 
+          red_social, 
+          estado, 
+          activos (url_imagen, tags)
+        `);
+
+      if (data && !error) {
+        const formattedPosts = data.map((d: any) => ({
+          id: d.id,
+          copy: d.texto_copy,
+          // Formateamos la fecha a algo legible (puedes ajustarlo luego con date-fns si prefieres)
+          when: new Date(d.fecha_publicacion).toLocaleString('es-CO', { dateStyle: 'short', timeStyle: 'short' }),
+          network: d.red_social,
+          status: d.estado,
+          img: d.activos?.url_imagen || '',
+          pillar: d.activos?.tags || 'General'
+        }));
+        setPosts(formattedPosts);
+      } else if (error) {
+        toast.error("Error cargando publicaciones");
+        console.error(error);
+      }
+    };
+    
+    fetchPosts();
+  }, []);
+
   const scheduled = posts.filter((p) => p.status === "programado").length;
 
-  const approve = (id: number) => {
+  const approve = async (id: string) => {
+    // Actualización optimista en la UI
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status: "programado" } : p)));
-    toast.success("Publicación aprobada y programada");
+    
+    // Actualización real en la base de datos
+    const { error } = await supabase
+      .from('publicaciones')
+      .update({ estado: 'programado' })
+      .eq('id', id);
+      
+    if (error) {
+      toast.error("Hubo un error al guardar en la base de datos");
+      // Revertir estado si falla (opcional, pero buena práctica)
+      setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status: "pendiente" } : p)));
+    } else {
+      toast.success("Publicación aprobada y programada");
+    }
   };
+
   const toggle = (v: boolean) => {
     setAuto(v);
     if (v) setPosts((ps) => ps.map((p) => ({ ...p, status: "programado" })));
     toast(v ? "Modo Autónomo activado" : "Modo Supervisado activado");
   };
-  const openEdit = (id: number) => {
+
+  const openEdit = (id: string) => {
     const post = posts.find((p) => p.id === id);
     if (post) setEditing({ id, draft: post.copy });
   };
-  const saveCopy = () => {
+
+  const saveCopy = async () => {
     if (!editing) return;
     const text = editing.draft.trim();
     if (!text) {
       toast.error("El texto no puede quedar vacío");
       return;
     }
-    setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text } : p)));
+    
+    // UI optimista
+    setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text, status: "programado" } : p)));
+    
+    // DB real
+    const { error } = await supabase
+      .from('publicaciones')
+      .update({ texto_copy: text, estado: 'programado' })
+      .eq('id', editing.id);
+
     setEditing(null);
-    toast.success("Texto actualizado");
+    
+    if (error) toast.error("Error guardando el texto");
+    else toast.success("Texto actualizado y programado");
   };
 
   const stats = [
     { label: "Posts Programados", value: scheduled, icon: CalendarClock, tone: "bg-primary-soft text-primary" },
     { label: "Publicados este mes", value: 24, icon: CheckCircle2, tone: "bg-success-soft text-success" },
-    { label: "Activos Disponibles en Galería", value: assets.length, icon: ImageIcon, tone: "bg-violet-soft text-violet" },
+    { label: "Activos Disponibles en Galería", value: 12, icon: ImageIcon, tone: "bg-violet-soft text-violet" }, // Mock temporal hasta conectar galería
   ];
 
   return (
@@ -120,6 +195,9 @@ function Dashboard() {
             )}
           </article>
         ))}
+        {posts.length === 0 && (
+          <p className="text-muted-foreground text-sm py-4">Cargando publicaciones o no hay publicaciones disponibles...</p>
+        )}
       </div>
 
       <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
