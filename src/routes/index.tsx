@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/lib/supabase";
+import { posts as samplePosts } from "@/lib/data";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -43,6 +44,10 @@ function Dashboard() {
   // Cargar datos reales de Supabase
   useEffect(() => {
     const fetchPosts = async () => {
+      if (!supabase) {
+        setPosts(samplePosts.map((p) => ({ ...p, id: String(p.id) })));
+        return;
+      }
       const { data, error } = await supabase
         .from('publicaciones')
         .select(`
@@ -81,7 +86,7 @@ function Dashboard() {
     // Actualización optimista en la UI
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status: "programado" } : p)));
     
-    // Actualización real en la base de datos
+    if (!supabase) { toast.success("Publicación aprobada y programada"); return; }
     const { error } = await supabase
       .from('publicaciones')
       .update({ estado: 'programado' })
@@ -118,7 +123,7 @@ function Dashboard() {
     // UI optimista
     setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text, status: "programado" } : p)));
     
-    // DB real
+    if (!supabase) { setEditing(null); toast.success("Texto actualizado y programado"); return; }
     const { error } = await supabase
       .from('publicaciones')
       .update({ texto_copy: text, estado: 'programado' })
@@ -137,7 +142,7 @@ function Dashboard() {
   ];
 
   return (
-    <AppShell title={<span className="text-blue-900">AutoSocial AI - Panel de Control Automático</span>} subtitle="Café Don Juan · Próximas publicaciones generadas por IA">
+    <AppShell title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>} subtitle="Café Don Juan · Próximas publicaciones generadas por IA">
       <div className="grid gap-4 sm:grid-cols-3">
         {stats.map((s) => (
           <div key={s.label} className="flex items-center gap-4 rounded-2xl border bg-card p-5 shadow-card">

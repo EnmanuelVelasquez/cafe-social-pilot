@@ -1,14 +1,15 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, Sparkles, Images, Zap } from "lucide-react";
+import { LayoutDashboard, Sparkles, Images, Zap, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 
 const nav = [
   { to: "/", label: "Contenido", icon: LayoutDashboard },
   { to: "/marca", label: "Brand Engine", icon: Sparkles },
   { to: "/activos", label: "Activos", icon: Images },
+  { to: "/settings", label: "Ajustes", icon: Settings },
 ] as const;
 
-export function AppShell({ title, subtitle, action, children }: { title: string; subtitle: string; action?: ReactNode; children: ReactNode }) {
+export function AppShell({ title, subtitle, action, children }: { title: ReactNode; subtitle: string; action?: ReactNode; children: ReactNode }) {
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0 md:pl-64">
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r bg-card p-5 md:flex">
