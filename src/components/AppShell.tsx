@@ -1,11 +1,12 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, Sparkles, Images, Zap } from "lucide-react";
+import { LayoutDashboard, Sparkles, Images, Zap, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 
 const nav = [
   { to: "/", label: "Contenido", icon: LayoutDashboard },
   { to: "/marca", label: "Brand Engine", icon: Sparkles },
   { to: "/activos", label: "Activos", icon: Images },
+  { to: "/settings", label: "Ajustes", icon: Settings },
 ] as const;
 
 export function AppShell({ title, subtitle, action, children }: { title: string; subtitle: string; action?: ReactNode; children: ReactNode }) {
