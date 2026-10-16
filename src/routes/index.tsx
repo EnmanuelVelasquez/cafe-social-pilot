@@ -137,7 +137,7 @@ function Dashboard() {
   ];
 
   return (
-    <AppShell title={<span className="text-blue-900">AutoSocial AI - Panel de Control Automático</span>} subtitle="Café Don Juan · Próximas publicaciones generadas por IA">
+    <AppShell title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>} subtitle="Café Don Juan · Próximas publicaciones generadas por IA">
       <div className="grid gap-4 sm:grid-cols-3">
         {stats.map((s) => (
           <div key={s.label} className="flex items-center gap-4 rounded-2xl border bg-card p-5 shadow-card">
