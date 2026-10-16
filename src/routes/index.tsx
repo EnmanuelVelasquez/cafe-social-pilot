@@ -9,6 +9,7 @@ import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/lib/supabase";
+import { posts as samplePosts } from "@/lib/data";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -43,6 +44,10 @@ function Dashboard() {
   // Cargar datos reales de Supabase
   useEffect(() => {
     const fetchPosts = async () => {
+      if (!supabase) {
+        setPosts(samplePosts.map((p) => ({ ...p, id: String(p.id) })));
+        return;
+      }
       const { data, error } = await supabase
         .from('publicaciones')
         .select(`
@@ -81,7 +86,7 @@ function Dashboard() {
     // Actualización optimista en la UI
     setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status: "programado" } : p)));
     
-    // Actualización real en la base de datos
+    if (!supabase) { toast.success("Publicación aprobada y programada"); return; }
     const { error } = await supabase
       .from('publicaciones')
       .update({ estado: 'programado' })
@@ -118,7 +123,7 @@ function Dashboard() {
     // UI optimista
     setPosts((ps) => ps.map((p) => (p.id === editing.id ? { ...p, copy: text, status: "programado" } : p)));
     
-    // DB real
+    if (!supabase) { setEditing(null); toast.success("Texto actualizado y programado"); return; }
     const { error } = await supabase
       .from('publicaciones')
       .update({ texto_copy: text, estado: 'programado' })
