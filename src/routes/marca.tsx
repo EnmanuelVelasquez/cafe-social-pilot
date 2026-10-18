@@ -1,14 +1,18 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Save, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { setPillarValue, type Pillar } from "@/lib/brand";
+import { useBranchStore } from "@/lib/store";
+import { supabase } from "@/lib/supabase";
+import type { Sucursal } from "@/types";
 
 export const Route = createFileRoute("/marca")({
   head: () => ({
@@ -27,6 +31,8 @@ export const Route = createFileRoute("/marca")({
 const tones = ["Cercano", "Profesional", "Divertido", "Inspirador"];
 
 function Marca() {
+  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
+
   const [name, setName] = useState("Café Don Juan");
   const [tone, setTone] = useState("Cercano");
   const [pillars, setPillars] = useState<Pillar[]>([
@@ -37,16 +43,91 @@ function Marca() {
   const [rules, setRules] = useState("Nunca mencionar a la competencia. No usar las palabras \"barato\" ni \"instantáneo\". No hacer promesas de salud.");
   const total = pillars.reduce((a, p) => a + p.value, 0);
 
-  const save = () => {
+  useEffect(() => {
+    const fetchSucursales = async () => {
+      if (!supabase) return;
+      const { data, error } = await supabase.from("sucursales").select("*");
+      if (error) {
+        console.error(error);
+        toast.error("Error al cargar las sucursales");
+        return;
+      }
+      if (data) {
+        const lista = data as Sucursal[];
+        setSucursales(lista);
+        if (lista.length > 0 && !sucursalActiva && lista[0]) {
+          setSucursalActiva(lista[0]);
+        }
+      }
+    };
+
+    fetchSucursales();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (sucursalActiva) {
+      setName(sucursalActiva.nombre);
+      setTone(sucursalActiva.tono);
+      setRules(sucursalActiva.reglas_negativas);
+    }
+  }, [sucursalActiva]);
+
+  const save = async () => {
     if (!rules.trim()) { toast.error("Las Reglas Negativas son obligatorias"); return; }
     if (total !== 100) { toast.error(`Los pilares deben sumar 100% (actual: ${total}%)`); return; }
-    toast.success("Parámetros de marca guardados");
+    if (!sucursalActiva) { toast.error("Selecciona una sucursal activa"); return; }
+    if (!supabase) { toast.success("Parámetros de marca guardados"); return; }
+
+    try {
+      const { error } = await supabase
+        .from("sucursales")
+        .update({ nombre: name, tono: tone, reglas_negativas: rules })
+        .eq("id", sucursalActiva.id);
+
+      if (error) throw error;
+
+      const updated: Sucursal = {
+        ...sucursalActiva,
+        nombre: name,
+        tono: tone,
+        reglas_negativas: rules,
+      };
+      setSucursalActiva(updated);
+      setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
+
+      toast.success("Parámetros de marca guardados");
+    } catch (error) {
+      console.error(error);
+      toast.error("Error al guardar los parámetros en la base de datos");
+    }
   };
 
   return (
     <AppShell title="Configuración de Marca" subtitle="Brand Engine · Enseña a la IA cómo habla tu marca">
       <div className="space-y-5">
         <section className="grid gap-5 rounded-2xl border bg-card p-5 shadow-card md:grid-cols-2 md:p-6">
+          <div className="space-y-2 md:col-span-2">
+            <Label htmlFor="branch-select">Sucursal Activa</Label>
+            <Select
+              value={sucursalActiva?.id ?? ""}
+              onValueChange={(id) => {
+                const selected = sucursales.find((s) => s.id === id) ?? null;
+                setSucursalActiva(selected);
+              }}
+            >
+              <SelectTrigger id="branch-select">
+                <SelectValue placeholder="Selecciona una sucursal" />
+              </SelectTrigger>
+              <SelectContent>
+                {sucursales.map((s) => (
+                  <SelectItem key={s.id} value={s.id}>
+                    {s.nombre}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="name">Nombre de la empresa</Label>
             <Input id="name" value={name} onChange={(e) => setName(e.target.value)} />
