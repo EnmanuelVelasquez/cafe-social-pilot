@@ -67,39 +67,57 @@ function Marca() {
 
   useEffect(() => {
     if (sucursalActiva) {
-      setName(sucursalActiva.nombre);
-      setTone(sucursalActiva.tono);
-      setRules(sucursalActiva.reglas_negativas);
+      setName(sucursalActiva.nombre ?? "");
+      setTone(sucursalActiva.tono ?? "Cercano");
+      setRules(sucursalActiva.reglas_negativas ?? "");
     }
   }, [sucursalActiva]);
 
   const save = async () => {
-    if (!rules.trim()) { toast.error("Las Reglas Negativas son obligatorias"); return; }
+    const cleanName = (name ?? "").trim();
+    const cleanRules = (rules ?? "").trim();
+
+    if (!cleanName) { toast.error("El nombre de la sucursal es obligatorio"); return; }
+    if (!cleanRules) { toast.error("Las Reglas Negativas son obligatorias"); return; }
     if (total !== 100) { toast.error(`Los pilares deben sumar 100% (actual: ${total}%)`); return; }
-    if (!sucursalActiva) { toast.error("Selecciona una sucursal activa"); return; }
     if (!supabase) { toast.success("Parámetros de marca guardados"); return; }
 
     try {
-      const { error } = await supabase
-        .from("sucursales")
-        .update({ nombre: name, tono: tone, reglas_negativas: rules })
-        .eq("id", sucursalActiva.id);
+      if (sucursalActiva) {
+        const { data, error } = await supabase
+          .from("sucursales")
+          .update({ nombre: cleanName, tono: tone || "Cercano", reglas_negativas: cleanRules })
+          .eq("id", sucursalActiva.id)
+          .select();
 
-      if (error) throw error;
+        if (error) throw error;
+        if (!data || data.length === 0) {
+          toast.error("No se pudo actualizar la sucursal en Supabase. Verifica las políticas RLS (UPDATE) de la tabla 'sucursales'.");
+          return;
+        }
 
-      const updated: Sucursal = {
-        ...sucursalActiva,
-        nombre: name,
-        tono: tone,
-        reglas_negativas: rules,
-      };
-      setSucursalActiva(updated);
-      setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
+        const updated = data[0] as Sucursal;
+        setSucursalActiva(updated);
+        setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
+      } else {
+        const { data, error } = await supabase
+          .from("sucursales")
+          .insert([{ nombre: cleanName, tono: tone || "Cercano", reglas_negativas: cleanRules }])
+          .select()
+          .single();
 
-      toast.success("Parámetros de marca guardados");
-    } catch (error) {
+        if (error) throw error;
+        if (data) {
+          const created = data as Sucursal;
+          setSucursales([...sucursales, created]);
+          setSucursalActiva(created);
+        }
+      }
+
+      toast.success("Parámetros de marca guardados en Supabase");
+    } catch (error: any) {
       console.error(error);
-      toast.error("Error al guardar los parámetros en la base de datos");
+      toast.error(error?.message ? `Error al guardar: ${error.message}` : "Error al guardar los parámetros en la base de datos");
     }
   };
 

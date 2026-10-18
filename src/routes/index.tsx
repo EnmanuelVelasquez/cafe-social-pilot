@@ -41,6 +41,7 @@ type PostData = {
 function Dashboard() {
   const { sucursalActiva } = useBranchStore();
   const [posts, setPosts] = useState<PostData[]>([]);
+  const [assetsCount, setAssetsCount] = useState(0);
   const [auto, setAuto] = useState(false);
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
   
@@ -48,6 +49,7 @@ function Dashboard() {
   useEffect(() => {
     if (!sucursalActiva) {
       setPosts([]);
+      setAssetsCount(0);
       return;
     }
 
@@ -56,17 +58,27 @@ function Dashboard() {
         setPosts(samplePosts.map((p) => ({ ...p, id: String(p.id) })));
         return;
       }
-      const { data, error } = await supabase
-        .from('publicaciones')
-        .select(`
-          id, 
-          texto_copy, 
-          fecha_publicacion, 
-          red_social, 
-          estado, 
-          activos (url_imagen, tags)
-        `)
-        .eq('sucursal_id', sucursalActiva.id);
+      const [{ data, error }, { count }] = await Promise.all([
+        supabase
+          .from('publicaciones')
+          .select(`
+            id, 
+            texto_copy, 
+            fecha_publicacion, 
+            red_social, 
+            estado, 
+            activos (url_imagen, tags)
+          `)
+          .eq('sucursal_id', sucursalActiva.id),
+        supabase
+          .from('activos')
+          .select('id', { count: 'exact', head: true })
+          .eq('sucursal_id', sucursalActiva.id),
+      ]);
+
+      if (typeof count === 'number') {
+        setAssetsCount(count);
+      }
 
       if (data && !error) {
         const formattedPosts = data.map((d: any) => ({
@@ -174,7 +186,7 @@ function Dashboard() {
   const stats = [
     { label: "Posts Programados", value: scheduled, icon: CalendarClock, tone: "bg-primary-soft text-primary" },
     { label: "Publicados este mes", value: 24, icon: CheckCircle2, tone: "bg-success-soft text-success" },
-    { label: "Activos Disponibles en Galería", value: 12, icon: ImageIcon, tone: "bg-violet-soft text-violet" }, // Mock temporal hasta conectar galería
+    { label: "Activos Disponibles en Galería", value: assetsCount, icon: ImageIcon, tone: "bg-violet-soft text-violet" },
   ];
 
   if (!sucursalActiva) {
