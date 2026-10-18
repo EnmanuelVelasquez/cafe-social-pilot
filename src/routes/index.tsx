@@ -1,13 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
-import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil } from "lucide-react";
+import { CalendarClock, CheckCircle2, ImageIcon, Instagram, Facebook, Clock, Bot, ShieldCheck, Pencil, Download, Copy, Store } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import { posts as samplePosts } from "@/lib/data";
 
@@ -37,12 +39,18 @@ type PostData = {
 };
 
 function Dashboard() {
+  const { sucursalActiva } = useBranchStore();
   const [posts, setPosts] = useState<PostData[]>([]);
   const [auto, setAuto] = useState(false);
   const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
   
   // Cargar datos reales de Supabase
   useEffect(() => {
+    if (!sucursalActiva) {
+      setPosts([]);
+      return;
+    }
+
     const fetchPosts = async () => {
       if (!supabase) {
         setPosts(samplePosts.map((p) => ({ ...p, id: String(p.id) })));
@@ -57,7 +65,8 @@ function Dashboard() {
           red_social, 
           estado, 
           activos (url_imagen, tags)
-        `);
+        `)
+        .eq('sucursal_id', sucursalActiva.id);
 
       if (data && !error) {
         const formattedPosts = data.map((d: any) => ({
@@ -78,9 +87,36 @@ function Dashboard() {
     };
     
     fetchPosts();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sucursalActiva?.id]);
 
   const scheduled = posts.filter((p) => p.status === "programado").length;
+
+  const handleCopyText = (text: string) => {
+    navigator.clipboard.writeText(text);
+    toast.success("Copy copiado al portapapeles");
+  };
+
+  const handleDownloadImage = async (url: string) => {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Error al obtener la imagen");
+      const blob = await response.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = `publicacion-${Date.now()}.jpg`;
+      link.style.display = "none";
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(blobUrl);
+      toast.success("Imagen descargada correctamente");
+    } catch (error) {
+      console.error(error);
+      toast.error("Error al descargar la imagen");
+    }
+  };
 
   const approve = async (id: string) => {
     // Actualización optimista en la UI
@@ -141,8 +177,32 @@ function Dashboard() {
     { label: "Activos Disponibles en Galería", value: 12, icon: ImageIcon, tone: "bg-violet-soft text-violet" }, // Mock temporal hasta conectar galería
   ];
 
+  if (!sucursalActiva) {
+    return (
+      <AppShell
+        title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>}
+        subtitle="Próximas publicaciones generadas por IA"
+      >
+        <div className="flex min-h-[50vh] items-center justify-center">
+          <Card className="max-w-md text-center shadow-card">
+            <CardHeader className="items-center pb-2">
+              <div className="grid h-12 w-12 place-items-center rounded-2xl bg-primary-soft text-primary">
+                <Store className="h-6 w-6" />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <p className="text-sm font-medium text-muted-foreground">
+                Por favor, selecciona una sucursal en Configuración para ver las publicaciones
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+      </AppShell>
+    );
+  }
+
   return (
-    <AppShell title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>} subtitle="Café Don Juan · Próximas publicaciones generadas por IA">
+    <AppShell title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>} subtitle={`${sucursalActiva.nombre} · Próximas publicaciones generadas por IA`}>
       <div className="grid gap-4 sm:grid-cols-3">
         {stats.map((s) => (
           <div key={s.label} className="flex items-center gap-4 rounded-2xl border bg-card p-5 shadow-card">
@@ -188,16 +248,34 @@ function Dashboard() {
               </div>
               <p className="mt-3 text-sm leading-relaxed">{p.copy}</p>
             </div>
-            {p.status === "pendiente" && (
-              <div className="flex shrink-0 gap-2 self-start sm:self-center">
-                <Button variant="brand" onClick={() => approve(p.id)}>
-                  <CheckCircle2 /> Aprobar y Programar
-                </Button>
-                <Button variant="outline" onClick={() => openEdit(p.id)}>
-                  <Pencil /> Editar Copy
-                </Button>
-              </div>
-            )}
+            <div className="flex shrink-0 flex-wrap items-center gap-2 self-start sm:self-center">
+              <Button
+                variant="ghost"
+                size="icon"
+                title="Copiar Copy"
+                onClick={() => handleCopyText(p.copy)}
+              >
+                <Copy className="h-4 w-4" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                title="Descargar Imagen"
+                onClick={() => handleDownloadImage(p.img)}
+              >
+                <Download className="h-4 w-4" />
+              </Button>
+              {p.status === "pendiente" && (
+                <>
+                  <Button variant="brand" onClick={() => approve(p.id)}>
+                    <CheckCircle2 /> Aprobar y Programar
+                  </Button>
+                  <Button variant="outline" onClick={() => openEdit(p.id)}>
+                    <Pencil /> Editar Copy
+                  </Button>
+                </>
+              )}
+            </div>
           </article>
         ))}
         {posts.length === 0 && (
