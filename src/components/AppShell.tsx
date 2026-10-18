@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, Sparkles, Images, Zap, Settings } from "lucide-react";
+import { LayoutDashboard, Sparkles, Images, Zap, Settings, Store } from "lucide-react";
 import type { ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
+import { useBranchStore } from "@/lib/store";
 
 const nav = [
   { to: "/", label: "Contenido", icon: LayoutDashboard },
@@ -10,6 +12,8 @@ const nav = [
 ] as const;
 
 export function AppShell({ title, subtitle, action, children }: { title: ReactNode; subtitle: string; action?: ReactNode; children: ReactNode }) {
+  const { sucursalActiva } = useBranchStore();
+
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0 md:pl-64">
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r bg-card p-5 md:flex">
@@ -26,11 +30,24 @@ export function AppShell({ title, subtitle, action, children }: { title: ReactNo
           <div className="min-w-0"><p className="truncate text-sm font-semibold">Café Don Juan</p><p className="text-xs text-muted-foreground">Plan Agencia</p></div>
         </div>
       </aside>
-      <header className="sticky top-0 z-20 flex items-center border-b bg-card/90 px-4 py-3 backdrop-blur md:hidden"><Brand /></header>
+      <header className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b bg-card/90 px-4 py-3 backdrop-blur md:hidden">
+        <Brand />
+      </header>
       <main className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-10">
         <div className="mb-6 grid gap-4 sm:flex sm:items-end sm:justify-between">
           <div className="min-w-0">
-            <h1 className="font-display text-2xl font-bold tracking-tight md:text-3xl">{title}</h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="font-display text-2xl font-bold tracking-tight md:text-3xl">{title}</h1>
+              {sucursalActiva ? (
+                <Badge className="flex items-center gap-1.5" variant="secondary">
+                  <Store className="w-3.5 h-3.5" /> {sucursalActiva.nombre}
+                </Badge>
+              ) : (
+                <Badge className="text-muted-foreground text-xs" variant="outline">
+                  Sin sucursal seleccionada
+                </Badge>
+              )}
+            </div>
             <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
           </div>
           {action}
