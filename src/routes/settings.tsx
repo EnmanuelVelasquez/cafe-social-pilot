@@ -88,6 +88,14 @@ function Settings() {
       return;
     }
     if (!supabase) {
+      const updated: Sucursal = {
+        ...sucursalActiva,
+        nombre: cleanName,
+        tono: cleanTone || "Cercano",
+        reglas_negativas: cleanRules,
+      };
+      setSucursalActiva(updated);
+      setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
       toast.success("Cambios de sucursal guardados");
       return;
     }
@@ -121,7 +129,16 @@ function Settings() {
 
   const handleCreateBranch = async () => {
     if (!supabase) {
-      toast.error("No hay conexión configurada con Supabase");
+      const created: Sucursal = {
+        id: `sucursal-${Date.now()}`,
+        perfil_id: sucursalActiva?.perfil_id ?? "perfil-1",
+        nombre: `Nueva Sucursal ${sucursales.length + 1}`,
+        tono: "Cercano",
+        reglas_negativas: "Nunca mencionar a la competencia.",
+      };
+      setSucursales([...sucursales, created]);
+      setSucursalActiva(created);
+      toast.success("Nueva sucursal creada");
       return;
     }
 

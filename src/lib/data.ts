@@ -2,6 +2,24 @@ import a1 from "@/assets/a1.jpg";
 import a2 from "@/assets/a2.jpg";
 import a3 from "@/assets/a3.jpg";
 import a4 from "@/assets/a4.jpg";
+import type { Sucursal } from "@/types";
+
+export const sampleBranches: Sucursal[] = [
+  {
+    id: "centro",
+    perfil_id: "perfil-1",
+    nombre: "Sede Centro",
+    tono: "Cercano",
+    reglas_negativas: 'Nunca mencionar a la competencia. No usar las palabras "barato" ni "instantáneo". No hacer promesas de salud.',
+  },
+  {
+    id: "norte",
+    perfil_id: "perfil-1",
+    nombre: "Sede Norte",
+    tono: "Profesional",
+    reglas_negativas: 'Nunca mencionar a la competencia. Evitar jerga informal.',
+  },
+];
 
 export type Status = "pendiente" | "programado";
 export interface Post {

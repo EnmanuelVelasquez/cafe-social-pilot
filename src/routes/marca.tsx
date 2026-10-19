@@ -80,7 +80,20 @@ function Marca() {
     if (!cleanName) { toast.error("El nombre de la sucursal es obligatorio"); return; }
     if (!cleanRules) { toast.error("Las Reglas Negativas son obligatorias"); return; }
     if (total !== 100) { toast.error(`Los pilares deben sumar 100% (actual: ${total}%)`); return; }
-    if (!supabase) { toast.success("Parámetros de marca guardados"); return; }
+    if (!supabase) {
+      if (sucursalActiva) {
+        const updated: Sucursal = {
+          ...sucursalActiva,
+          nombre: cleanName,
+          tono: tone || "Cercano",
+          reglas_negativas: cleanRules,
+        };
+        setSucursalActiva(updated);
+        setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
+      }
+      toast.success("Parámetros de marca guardados");
+      return;
+    }
 
     try {
       if (sucursalActiva) {

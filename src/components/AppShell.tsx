@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import { LayoutDashboard, Sparkles, Images, Zap, Settings, Store } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
+import { sampleBranches } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { Sucursal } from "@/types";
@@ -17,7 +18,14 @@ export function AppShell({ title, subtitle, action, children }: { title: ReactNo
   const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
 
   useEffect(() => {
-    if (!supabase || sucursales.length > 0) return;
+    if (sucursales.length > 0) return;
+    if (!supabase) {
+      setSucursales(sampleBranches);
+      if (!useBranchStore.getState().sucursalActiva && sampleBranches[0]) {
+        setSucursalActiva(sampleBranches[0]);
+      }
+      return;
+    }
     let active = true;
     supabase
       .from("sucursales")
