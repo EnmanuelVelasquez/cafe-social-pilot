@@ -75,7 +75,14 @@ function Activos() {
             img: d.url_imagen || "",
             name: d.nombre || parsedTags[0] || `Activo ${index + 1}`,
             tags: parsedTags,
-            uses: typeof d.usos === "number" ? d.usos : typeof d.uses === "number" ? d.uses : 0,
+            uses:
+              typeof d.contador_uso === "number"
+                ? d.contador_uso
+                : typeof d.usos === "number"
+                  ? d.usos
+                  : typeof d.uses === "number"
+                    ? d.uses
+                    : 0,
           };
         });
         setAssetsList(mapped);

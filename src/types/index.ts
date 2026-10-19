@@ -16,6 +16,7 @@ export interface Activo {
   sucursal_id: string;
   url_imagen: string;
   tags: string;
+  contador_uso?: number;
 }
 
 export interface Publicacion {

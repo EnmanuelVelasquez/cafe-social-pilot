@@ -102,7 +102,7 @@ function Dashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sucursalActiva?.id]);
 
-  const scheduled = posts.filter((p) => p.status === "programado").length;
+  const scheduled = posts.filter((p) => p.status === "programado" || p.status === "programada").length;
 
   const handleCopyText = (text: string) => {
     navigator.clipboard.writeText(text);
