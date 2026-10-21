@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
-import { Plus, Repeat, Store, TriangleAlert } from "lucide-react";
+import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { Loader2, Plus, Repeat, Store, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Button } from "@/components/ui/button";
@@ -37,10 +37,30 @@ function parseTags(raw: unknown): string[] {
   return [];
 }
 
+function mapRowToAsset(d: any, index: number): Asset {
+  const parsedTags = parseTags(d.tags);
+  return {
+    id: d.id ?? index + 1,
+    img: d.url_imagen || "",
+    name: parsedTags[0] || `Activo ${index + 1}`,
+    tags: parsedTags.length > 0 ? parsedTags : ["Pendiente de IA"],
+    uses:
+      typeof d.contador_uso === "number"
+        ? d.contador_uso
+        : typeof d.usos === "number"
+          ? d.usos
+          : typeof d.uses === "number"
+            ? d.uses
+            : 0,
+  };
+}
+
 function Activos() {
   const { sucursalActiva } = useBranchStore();
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [tag, setTag] = useState("Todos");
+  const [isUploading, setIsUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setTag("Todos");
@@ -59,7 +79,8 @@ function Activos() {
       const { data, error } = await supabase
         .from("activos")
         .select("*")
-        .eq("sucursal_id", sucursalActiva.id);
+        .eq("sucursal_id", sucursalActiva.id)
+        .order("created_at", { ascending: false });
 
       if (error) {
         console.error(error);
@@ -68,29 +89,80 @@ function Activos() {
       }
 
       if (data) {
-        const mapped: Asset[] = data.map((d: any, index: number) => {
-          const parsedTags = parseTags(d.tags);
-          return {
-            id: d.id ?? index + 1,
-            img: d.url_imagen || "",
-            name: d.nombre || parsedTags[0] || `Activo ${index + 1}`,
-            tags: parsedTags,
-            uses:
-              typeof d.contador_uso === "number"
-                ? d.contador_uso
-                : typeof d.usos === "number"
-                  ? d.usos
-                  : typeof d.uses === "number"
-                    ? d.uses
-                    : 0,
-          };
-        });
-        setAssetsList(mapped);
+        setAssetsList(data.map((d: any, index: number) => mapRowToAsset(d, index)));
       }
     };
 
     fetchActivos();
   }, [sucursalActiva?.id]);
+
+  const handleFileUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    if (!sucursalActiva) {
+      toast.error("Por favor, selecciona una sucursal antes de subir un activo");
+      event.target.value = "";
+      return;
+    }
+
+    if (!supabase) {
+      toast.error("No hay conexión configurada con Supabase");
+      event.target.value = "";
+      return;
+    }
+
+    setIsUploading(true);
+    const loadingToast = toast.loading("Subiendo imagen...");
+
+    try {
+      const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const fileName = `${sucursalActiva.id}/${Date.now()}-${safeName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("galeria")
+        .upload(fileName, file);
+
+      if (uploadError) throw uploadError;
+
+      const {
+        data: { publicUrl },
+      } = supabase.storage.from("galeria").getPublicUrl(fileName);
+
+      const { data: inserted, error: insertError } = await supabase
+        .from("activos")
+        .insert([
+          {
+            sucursal_id: sucursalActiva.id,
+            url_imagen: publicUrl,
+            tags: "Pendiente de IA",
+            contador_uso: 0,
+          },
+        ])
+        .select()
+        .single();
+
+      if (insertError) throw insertError;
+
+      if (inserted) {
+        setAssetsList((prev) => [mapRowToAsset(inserted, 0), ...prev]);
+      }
+
+      toast.dismiss(loadingToast);
+      toast.success("Imagen subida y registrada correctamente");
+    } catch (error: any) {
+      console.error(error);
+      toast.dismiss(loadingToast);
+      toast.error(
+        error?.message
+          ? `Error al subir imagen: ${error.message}`
+          : "No se pudo subir la imagen",
+      );
+    } finally {
+      setIsUploading(false);
+      event.target.value = "";
+    }
+  };
 
   if (!sucursalActiva) {
     return (
@@ -124,7 +196,26 @@ function Activos() {
     <AppShell
       title="Biblioteca de Activos"
       subtitle={`${sucursalActiva.nombre} · ${assetsList.length} imágenes etiquetadas automáticamente por IA`}
-      action={<Button variant="brand" size="lg" onClick={() => toast("Selector de archivos próximamente")}><Plus /> Subir Nuevos Activos</Button>}
+      action={
+        <>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleFileUpload}
+          />
+          <Button
+            variant="brand"
+            size="lg"
+            disabled={isUploading}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            {isUploading ? <Loader2 className="animate-spin" /> : <Plus />}
+            {isUploading ? "Subiendo..." : "Subir Nuevos Activos"}
+          </Button>
+        </>
+      }
     >
       {isLowStock(assetsList) && (
         <Alert variant="warning" className="mb-5 rounded-xl">

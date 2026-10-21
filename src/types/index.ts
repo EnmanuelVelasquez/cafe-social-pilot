@@ -1,6 +1,7 @@
 export interface Perfil {
   id: string;
   nombre: string;
+  created_at?: string;
 }
 
 export interface Sucursal {
@@ -9,6 +10,7 @@ export interface Sucursal {
   nombre: string;
   tono: string;
   reglas_negativas: string;
+  created_at?: string;
 }
 
 export interface Activo {
@@ -17,6 +19,7 @@ export interface Activo {
   url_imagen: string;
   tags: string;
   contador_uso?: number;
+  created_at?: string;
 }
 
 export interface Publicacion {
@@ -27,4 +30,14 @@ export interface Publicacion {
   red_social: string;
   estado: string;
   activo_id: string;
+  created_at?: string;
 }
+
+export interface IntegracionSocial {
+  id: string;
+  sucursal_id: string;
+  plataforma: string;
+  token_cifrado: string;
+  created_at?: string;
+}
+
