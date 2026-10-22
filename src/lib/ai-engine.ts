@@ -47,10 +47,10 @@ export function parseAndValidateAIPostResponse(raw: unknown): AIPostResponse {
   }
 
   const obj = parsed as Record<string, unknown>;
-  const postType = obj.post_type;
-  const copyText = obj.copy_text;
-  const visualTags = obj.recommended_visual_tags;
-  const ctaUsed = obj.call_to_action_used;
+  const postType = obj["post_type"];
+  const copyText = obj["copy_text"];
+  const visualTags = obj["recommended_visual_tags"];
+  const ctaUsed = obj["call_to_action_used"];
 
   if (
     typeof postType !== "string" ||
@@ -205,7 +205,7 @@ export async function generateSocialPostForBranch(
   }
 
   const systemPrompt = buildBrandSystemPrompt(branch);
-  const webhookUrl = import.meta.env.VITE_AI_WEBHOOK_URL as string | undefined;
+  const webhookUrl = import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined;
 
   const aiResponse = await generateWithRetry(async () => {
     if (webhookUrl) {
