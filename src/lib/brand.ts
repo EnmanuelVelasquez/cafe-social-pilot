@@ -1,3 +1,5 @@
+import type { Sucursal } from "@/types";
+
 export interface Pillar {
   name: string;
   value: number;
@@ -41,4 +43,28 @@ export function setPillarValue(pillars: Pillar[], index: number, value: number):
   return pillars.map((p, i) =>
     i === index ? { ...p, value: target } : { ...p, value: shares[++next] ?? 0 },
   );
+}
+
+/**
+ * REQ-1.2 (Brand Guardrails): Construye el prompt de sistema inyectando siempre al final
+ * la cláusula obligatoria de Reglas Negativas.
+ */
+export function buildBrandSystemPrompt(
+  branch: Pick<Sucursal, "nombre" | "tono" | "reglas_negativas">,
+  pillars: Pillar[] = [],
+): string {
+  const cleanRules = branch.reglas_negativas.trim();
+  const pillarsSummary =
+    pillars.length >= 2
+      ? `Distribución de pilares: ${pillars.map((p) => `${p.name} (${p.value}%)`).join(", ")}.`
+      : "";
+
+  return [
+    `Eres el asistente de marketing de la marca "${branch.nombre}".`,
+    `Tono de comunicación obligatorio: ${branch.tono || "Cercano"}.`,
+    pillarsSummary,
+    `Bajo ninguna circunstancia debes mencionar o hacer alusión a lo siguiente: [${cleanRules}]`,
+  ]
+    .filter(Boolean)
+    .join(" ");
 }

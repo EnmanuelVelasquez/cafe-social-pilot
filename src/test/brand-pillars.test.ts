@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { TOTAL_SHARE, setPillarValue, type Pillar } from "@/lib/brand";
+import { TOTAL_SHARE, buildBrandSystemPrompt, setPillarValue, type Pillar } from "@/lib/brand";
 
 const base: Pillar[] = [
   { name: "Educativo", value: 40 },
@@ -65,5 +65,23 @@ describe("Pilares de contenido siempre suman 100%", () => {
 
     expect(total(ps)).toBe(100);
     ps.forEach((p) => expect(Number.isInteger(p.value)).toBe(true));
+  });
+});
+
+describe("Guardrails de Marca (REQ-1.2)", () => {
+  it("inyecta siempre las reglas negativas al final del prompt de sistema", () => {
+    const prompt = buildBrandSystemPrompt(
+      {
+        nombre: "Sede Centro",
+        tono: "Cercano",
+        reglas_negativas: "No mencionar competencia ni usar la palabra barato",
+      },
+      base,
+    );
+
+    expect(prompt).toContain('marca "Sede Centro"');
+    expect(prompt.endsWith(
+      "Bajo ninguna circunstancia debes mencionar o hacer alusión a lo siguiente: [No mencionar competencia ni usar la palabra barato]",
+    )).toBe(true);
   });
 });

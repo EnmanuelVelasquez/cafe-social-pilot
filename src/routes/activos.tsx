@@ -1,12 +1,32 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Loader2, Plus, Repeat, Store, TriangleAlert } from "lucide-react";
+import { Loader2, Pencil, Plus, Repeat, Store, Trash2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { assets as sampleAssets, countUnused, isLowStock, type Asset } from "@/lib/data";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import {
+  assets as sampleAssets,
+  countUnused,
+  extractStoragePath,
+  formatTagsString,
+  inferTagsFromFilename,
+  isLowStock,
+  parseTags,
+  validateAssetFile,
+  type Asset,
+} from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 
@@ -24,26 +44,13 @@ export const Route = createFileRoute("/activos")({
   component: Activos,
 });
 
-function parseTags(raw: unknown): string[] {
-  if (Array.isArray(raw)) {
-    return raw.map((t) => String(t).trim()).filter(Boolean);
-  }
-  if (typeof raw === "string" && raw.trim()) {
-    return raw
-      .split(",")
-      .map((t) => t.trim())
-      .filter(Boolean);
-  }
-  return [];
-}
-
 function mapRowToAsset(d: any, index: number): Asset {
   const parsedTags = parseTags(d.tags);
   return {
     id: d.id ?? index + 1,
     img: d.url_imagen || "",
     name: parsedTags[0] || `Activo ${index + 1}`,
-    tags: parsedTags.length > 0 ? parsedTags : ["Pendiente de IA"],
+    tags: parsedTags.length > 0 ? parsedTags : ["#producto"],
     uses:
       typeof d.contador_uso === "number"
         ? d.contador_uso
@@ -60,6 +67,8 @@ function Activos() {
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [tag, setTag] = useState("Todos");
   const [isUploading, setIsUploading] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | number | null>(null);
+  const [editingTags, setEditingTags] = useState<{ id: string | number; draft: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -106,6 +115,13 @@ function Activos() {
       return;
     }
 
+    const validation = validateAssetFile(file);
+    if (!validation.valid) {
+      toast.error(validation.reason ?? "Archivo inválido");
+      event.target.value = "";
+      return;
+    }
+
     if (!supabase) {
       toast.error("No hay conexión configurada con Supabase");
       event.target.value = "";
@@ -113,7 +129,7 @@ function Activos() {
     }
 
     setIsUploading(true);
-    const loadingToast = toast.loading("Subiendo imagen...");
+    const loadingToast = toast.loading("Subiendo y etiquetando imagen...");
 
     try {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -129,13 +145,15 @@ function Activos() {
         data: { publicUrl },
       } = supabase.storage.from("galeria").getPublicUrl(fileName);
 
+      const autoTags = inferTagsFromFilename(file.name).join(", ");
+
       const { data: inserted, error: insertError } = await supabase
         .from("activos")
         .insert([
           {
             sucursal_id: sucursalActiva.id,
             url_imagen: publicUrl,
-            tags: "Pendiente de IA",
+            tags: autoTags,
             contador_uso: 0,
           },
         ])
@@ -149,7 +167,7 @@ function Activos() {
       }
 
       toast.dismiss(loadingToast);
-      toast.success("Imagen subida y registrada correctamente");
+      toast.success("Imagen subida y etiquetada correctamente");
     } catch (error: any) {
       console.error(error);
       toast.dismiss(loadingToast);
@@ -161,6 +179,108 @@ function Activos() {
     } finally {
       setIsUploading(false);
       event.target.value = "";
+    }
+  };
+
+  const handleDeleteAsset = async (asset: Asset) => {
+    setDeletingId(asset.id);
+
+    if (!supabase) {
+      setAssetsList((prev) => prev.filter((a) => a.id !== asset.id));
+      setDeletingId(null);
+      toast.success("Activo eliminado");
+      return;
+    }
+
+    try {
+      const { error: deleteDbError } = await supabase
+        .from("activos")
+        .delete()
+        .eq("id", String(asset.id));
+
+      if (deleteDbError) {
+        if (deleteDbError.code === "23503") {
+          toast.error(
+            "No se puede eliminar este activo porque ya está vinculado a una publicación.",
+          );
+          return;
+        }
+        throw deleteDbError;
+      }
+
+      const storagePath = extractStoragePath(asset.img, "galeria");
+      if (storagePath) {
+        await supabase.storage.from("galeria").remove([storagePath]);
+      }
+
+      setAssetsList((prev) => {
+        const next = prev.filter((a) => a.id !== asset.id);
+        if (tag !== "Todos" && !next.some((a) => a.tags.includes(tag))) {
+          setTag("Todos");
+        }
+        return next;
+      });
+
+      toast.success("Activo eliminado correctamente");
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al eliminar activo: ${error.message}`
+          : "No se pudo eliminar el activo",
+      );
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleSaveTags = async () => {
+    if (!editingTags) return;
+    const normalized = formatTagsString(editingTags.draft);
+    if (!normalized) {
+      toast.error("Ingresa al menos una etiqueta para el activo");
+      return;
+    }
+
+    const nextTags = parseTags(normalized);
+
+    if (!supabase) {
+      setAssetsList((prev) =>
+        prev.map((a) =>
+          a.id === editingTags.id
+            ? { ...a, tags: nextTags, name: nextTags[0] ?? a.name }
+            : a,
+        ),
+      );
+      setEditingTags(null);
+      toast.success("Etiquetas actualizadas");
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from("activos")
+        .update({ tags: normalized })
+        .eq("id", String(editingTags.id));
+
+      if (error) throw error;
+
+      setAssetsList((prev) =>
+        prev.map((a) =>
+          a.id === editingTags.id
+            ? { ...a, tags: nextTags, name: nextTags[0] ?? a.name }
+            : a,
+        ),
+      );
+      setEditingTags(null);
+      toast.success("Etiquetas actualizadas en Supabase");
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al guardar etiquetas: ${error.message}`
+          : "No se pudieron actualizar las etiquetas",
+      );
     }
   };
 
@@ -201,7 +321,7 @@ function Activos() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp"
             className="hidden"
             onChange={handleFileUpload}
           />
@@ -232,28 +352,116 @@ function Activos() {
       )}
       <div className="-mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-1">
         {allTags.map((t) => (
-          <button key={t} onClick={() => setTag(t)} className={`shrink-0 rounded-full border px-4 py-1.5 text-sm font-medium transition ${tag === t ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"}`}>{t}</button>
+          <button
+            key={t}
+            onClick={() => setTag(t)}
+            className={`shrink-0 rounded-full border px-4 py-1.5 text-sm font-medium transition ${tag === t ? "border-primary bg-primary text-primary-foreground" : "bg-card hover:bg-muted"}`}
+          >
+            {t}
+          </button>
         ))}
       </div>
       <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
-        {list.map((a) => (
-          <figure key={a.id} className="group overflow-hidden rounded-2xl border bg-card shadow-card">
-            <div className="relative">
-              <img src={a.img} alt={a.name} loading="lazy" width={816} height={816} className="aspect-square w-full object-cover transition duration-300 group-hover:scale-105" />
-              <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-card/90 px-2 py-1 text-xs font-semibold backdrop-blur"><Repeat className="h-3 w-3" />Veces usada: {a.uses}</span>
-            </div>
-            <figcaption className="p-3">
-              <p className="truncate text-sm font-semibold">{a.name}</p>
-              <div className="mt-2 flex flex-wrap gap-1">
-                {a.tags.map((t) => <span key={t} className="rounded-md bg-violet-soft px-2 py-0.5 text-xs font-medium text-violet">{t}</span>)}
+        {list.map((a) => {
+          const isDeleting = deletingId === a.id;
+          return (
+            <figure key={a.id} className="group overflow-hidden rounded-2xl border bg-card shadow-card">
+              <div className="relative">
+                <img
+                  src={a.img}
+                  alt={a.name}
+                  loading="lazy"
+                  width={816}
+                  height={816}
+                  className="aspect-square w-full object-cover transition duration-300 group-hover:scale-105"
+                />
+                <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-full bg-card/90 px-2 py-1 text-xs font-semibold backdrop-blur">
+                  <Repeat className="h-3 w-3" />Veces usada: {a.uses}
+                </span>
+                <div className="absolute left-2 top-2 flex items-center gap-1.5">
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="icon"
+                    className="h-8 w-8 rounded-full bg-card/90 backdrop-blur"
+                    title="Editar etiquetas"
+                    onClick={() =>
+                      setEditingTags({
+                        id: a.id,
+                        draft: a.tags.join(", "),
+                      })
+                    }
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    size="icon"
+                    className="h-8 w-8 rounded-full"
+                    title="Eliminar activo"
+                    disabled={isDeleting}
+                    onClick={() => handleDeleteAsset(a)}
+                  >
+                    {isDeleting ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Trash2 className="h-3.5 w-3.5" />
+                    )}
+                  </Button>
+                </div>
               </div>
-            </figcaption>
-          </figure>
-        ))}
+              <figcaption className="p-3">
+                <p className="truncate text-sm font-semibold">{a.name}</p>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  {a.tags.map((t) => (
+                    <span
+                      key={t}
+                      className="rounded-md bg-violet-soft px-2 py-0.5 text-xs font-medium text-violet"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
+              </figcaption>
+            </figure>
+          );
+        })}
       </div>
       {list.length === 0 && (
         <p className="text-sm text-muted-foreground py-4">No hay activos disponibles para esta sucursal.</p>
       )}
+
+      <Dialog open={editingTags !== null} onOpenChange={(open) => !open && setEditingTags(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Editar etiquetas del activo</DialogTitle>
+            <DialogDescription>
+              Separa las etiquetas con comas (ej. #producto, #ambiente, #oferta) para el algoritmo de cruce de la IA.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="asset-tags">Etiquetas visuales</Label>
+            <Input
+              id="asset-tags"
+              value={editingTags?.draft ?? ""}
+              onChange={(e) =>
+                setEditingTags((prev) => (prev ? { ...prev, draft: e.target.value } : prev))
+              }
+              placeholder="#producto, #ambiente, #origen"
+              autoFocus
+            />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditingTags(null)}>
+              Cancelar
+            </Button>
+            <Button variant="brand" onClick={handleSaveTags}>
+              Guardar etiquetas
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AppShell>
   );
 }
