@@ -148,3 +148,11 @@ export function inferTagsFromFilename(filename: string): string[] {
   }
   return Array.from(new Set(tokens.slice(0, 4).map((t) => `#${t}`)));
 }
+
+/**
+ * Verifica que una mutación (DELETE o UPDATE con `.select()`) en Supabase haya afectado al menos 1 fila.
+ * Cuando falta una política RLS (ej. DELETE o UPDATE en `activos`), PostgREST devuelve `error: null` y `data: []`.
+ */
+export function hasAffectedRows(rows: unknown[] | null | undefined): boolean {
+  return Array.isArray(rows) && rows.length > 0;
+}

@@ -7,6 +7,7 @@ import {
   countUnused,
   extractStoragePath,
   formatTagsString,
+  hasAffectedRows,
   inferTagsFromFilename,
   isLowStock,
   isZeroInventory,
@@ -52,7 +53,7 @@ describe("Alerta de banco de activos bajo y Riesgo de Inventario Cero", () => {
   });
 });
 
-describe("Validación de archivos de activos (REQ-2.1) y utilidades de Storage/Tags (REQ-2.2)", () => {
+describe("Validación de archivos de activos (REQ-2.1) y utilidades de Storage/Tags/RLS (REQ-2.2)", () => {
   it("acepta formatos JPG, PNG y WEBP de hasta 8 MB", () => {
     expect(validateAssetFile({ size: 1024 * 500, type: "image/jpeg" })).toEqual({ valid: true });
     expect(validateAssetFile({ size: MAX_ASSET_SIZE_BYTES, type: "image/png" })).toEqual({ valid: true });
@@ -86,5 +87,11 @@ describe("Validación de archivos de activos (REQ-2.1) y utilidades de Storage/T
     expect(formatTagsString("Producto, ambiente, #OFERTA, producto")).toBe(
       "#producto, #ambiente, #oferta",
     );
+  });
+
+  it("detecta cuando una operación DELETE o UPDATE en Supabase afectó 0 filas por bloqueo RLS", () => {
+    expect(hasAffectedRows([])).toBe(false);
+    expect(hasAffectedRows(null)).toBe(false);
+    expect(hasAffectedRows([{ id: "abc" }])).toBe(true);
   });
 });

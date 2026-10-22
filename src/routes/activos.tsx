@@ -21,6 +21,7 @@ import {
   countUnused,
   extractStoragePath,
   formatTagsString,
+  hasAffectedRows,
   inferTagsFromFilename,
   isLowStock,
   parseTags,
@@ -98,7 +99,10 @@ function Activos() {
       }
 
       if (data) {
-        setAssetsList(data.map((d: any, index: number) => mapRowToAsset(d, index)));
+        const validRows = data.filter(
+          (d: any) => d.url_imagen && d.url_imagen !== "https://example.com/test.jpg",
+        );
+        setAssetsList(validRows.map((d: any, index: number) => mapRowToAsset(d, index)));
       }
     };
 
@@ -193,10 +197,11 @@ function Activos() {
     }
 
     try {
-      const { error: deleteDbError } = await supabase
+      const { data: deletedRows, error: deleteDbError } = await supabase
         .from("activos")
         .delete()
-        .eq("id", String(asset.id));
+        .eq("id", String(asset.id))
+        .select();
 
       if (deleteDbError) {
         if (deleteDbError.code === "23503") {
@@ -206,6 +211,13 @@ function Activos() {
           return;
         }
         throw deleteDbError;
+      }
+
+      if (!hasAffectedRows(deletedRows)) {
+        toast.error(
+          "Supabase bloqueó el borrado (0 filas afectadas). Activa la política RLS de DELETE para la tabla 'activos' en Supabase.",
+        );
+        return;
       }
 
       const storagePath = extractStoragePath(asset.img, "galeria");
@@ -221,7 +233,7 @@ function Activos() {
         return next;
       });
 
-      toast.success("Activo eliminado correctamente");
+      toast.success("Activo eliminado correctamente de Supabase");
     } catch (error: any) {
       console.error(error);
       toast.error(
@@ -258,12 +270,20 @@ function Activos() {
     }
 
     try {
-      const { error } = await supabase
+      const { data: updatedRows, error } = await supabase
         .from("activos")
         .update({ tags: normalized })
-        .eq("id", String(editingTags.id));
+        .eq("id", String(editingTags.id))
+        .select();
 
       if (error) throw error;
+
+      if (!hasAffectedRows(updatedRows)) {
+        toast.error(
+          "Supabase bloqueó la actualización (0 filas afectadas). Activa la política RLS de UPDATE para la tabla 'activos' en Supabase.",
+        );
+        return;
+      }
 
       setAssetsList((prev) =>
         prev.map((a) =>

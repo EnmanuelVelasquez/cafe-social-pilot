@@ -41,6 +41,7 @@ import {
 } from "@/lib/ai-engine";
 import {
   assets as sampleAssets,
+  hasAffectedRows,
   isZeroInventory,
   parseTags,
   posts as samplePosts,
@@ -138,8 +139,11 @@ function Dashboard() {
         ]);
 
         if (assetsRes.data) {
+          const validAssets = assetsRes.data.filter(
+            (d: any) => d.url_imagen && d.url_imagen !== "https://example.com/test.jpg",
+          );
           setBranchAssets(
-            assetsRes.data.map((d: any, idx: number) => mapRowToAsset(d, idx)),
+            validAssets.map((d: any, idx: number) => mapRowToAsset(d, idx)),
           );
         }
 
@@ -316,12 +320,13 @@ function Dashboard() {
       toast.success("Publicación aprobada y programada");
       return;
     }
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("publicaciones")
       .update({ estado: "programado" })
-      .eq("id", id);
+      .eq("id", id)
+      .select();
 
-    if (error) {
+    if (error || !hasAffectedRows(data)) {
       toast.error("Hubo un error al guardar en la base de datos");
       setPosts((ps) => ps.map((p) => (p.id === id ? { ...p, status: "pendiente" } : p)));
     } else {
@@ -339,8 +344,18 @@ function Dashboard() {
     }
 
     try {
-      const { error } = await supabase.from("publicaciones").delete().eq("id", id);
+      const { data: deletedRows, error } = await supabase
+        .from("publicaciones")
+        .delete()
+        .eq("id", id)
+        .select();
       if (error) throw error;
+      if (!hasAffectedRows(deletedRows)) {
+        toast.error(
+          "Supabase bloqueó el borrado (0 filas afectadas). Activa la política RLS de DELETE para la tabla 'publicaciones'.",
+        );
+        return;
+      }
       setPosts((ps) => ps.filter((p) => p.id !== id));
       toast.success("Publicación eliminada");
     } catch (error: any) {
@@ -392,14 +407,15 @@ function Dashboard() {
       toast.success("Texto actualizado y programado");
       return;
     }
-    const { error } = await supabase
+    const { data, error } = await supabase
       .from("publicaciones")
       .update({ texto_copy: text, estado: "programado" })
-      .eq("id", editing.id);
+      .eq("id", editing.id)
+      .select();
 
     setEditing(null);
 
-    if (error) toast.error("Error guardando el texto");
+    if (error || !hasAffectedRows(data)) toast.error("Error guardando el texto en Supabase");
     else toast.success("Texto actualizado y programado");
   };
 
