@@ -1,6 +1,11 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, Sparkles, Images, Zap, Settings } from "lucide-react";
-import type { ReactNode } from "react";
+import { LayoutDashboard, Sparkles, Images, Zap, Settings, Store } from "lucide-react";
+import { useEffect, type ReactNode } from "react";
+import { Badge } from "@/components/ui/badge";
+import { sampleBranches } from "@/lib/data";
+import { useBranchStore } from "@/lib/store";
+import { supabase } from "@/lib/supabase";
+import type { Sucursal } from "@/types";
 
 const nav = [
   { to: "/", label: "Contenido", icon: LayoutDashboard },
@@ -10,6 +15,34 @@ const nav = [
 ] as const;
 
 export function AppShell({ title, subtitle, action, children }: { title: ReactNode; subtitle: string; action?: ReactNode; children: ReactNode }) {
+  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
+
+  useEffect(() => {
+    if (sucursales.length > 0) return;
+    if (!supabase) {
+      setSucursales(sampleBranches);
+      if (!useBranchStore.getState().sucursalActiva && sampleBranches[0]) {
+        setSucursalActiva(sampleBranches[0]);
+      }
+      return;
+    }
+    let active = true;
+    supabase
+      .from("sucursales")
+      .select("*")
+      .then(({ data, error }) => {
+        if (!active || error || !data) return;
+        const lista = data as Sucursal[];
+        setSucursales(lista);
+        if (lista.length > 0 && !useBranchStore.getState().sucursalActiva && lista[0]) {
+          setSucursalActiva(lista[0]);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [sucursales.length, setSucursales, setSucursalActiva]);
+
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0 md:pl-64">
       <aside className="fixed inset-y-0 left-0 hidden w-64 flex-col border-r bg-card p-5 md:flex">
@@ -23,21 +56,34 @@ export function AppShell({ title, subtitle, action, children }: { title: ReactNo
         </nav>
         <div className="mt-auto flex items-center gap-3 rounded-xl border p-3">
           <div className="grid h-9 w-9 place-items-center rounded-full bg-brand text-sm font-bold text-primary-foreground">CJ</div>
-          <div className="min-w-0"><p className="truncate text-sm font-semibold">Café Don Juan</p><p className="text-xs text-muted-foreground">Plan Agencia</p></div>
+          <div className="min-w-0"><p className="truncate text-sm font-semibold">{sucursalActiva?.nombre ?? "Café Don Juan"}</p><p className="text-xs text-muted-foreground">Plan Agencia</p></div>
         </div>
       </aside>
-      <header className="sticky top-0 z-20 flex items-center border-b bg-card/90 px-4 py-3 backdrop-blur md:hidden"><Brand /></header>
+      <header className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b bg-card/90 px-4 py-3 backdrop-blur md:hidden">
+        <Brand />
+      </header>
       <main className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-10">
         <div className="mb-6 grid gap-4 sm:flex sm:items-end sm:justify-between">
           <div className="min-w-0">
-            <h1 className="font-display text-2xl font-bold tracking-tight md:text-3xl">{title}</h1>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="font-display text-2xl font-bold tracking-tight md:text-3xl">{title}</h1>
+              {sucursalActiva ? (
+                <Badge className="flex items-center gap-1.5" variant="secondary">
+                  <Store className="w-3.5 h-3.5" /> {sucursalActiva.nombre}
+                </Badge>
+              ) : (
+                <Badge className="text-muted-foreground text-xs" variant="outline">
+                  Sin sucursal seleccionada
+                </Badge>
+              )}
+            </div>
             <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
           </div>
           {action}
         </div>
         {children}
       </main>
-      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-3 border-t bg-card md:hidden">
+      <nav className="fixed inset-x-0 bottom-0 z-20 grid grid-cols-4 border-t bg-card md:hidden">
         {nav.map((n) => (
           <Link key={n.to} to={n.to} activeOptions={{ exact: true }} className="flex flex-col items-center gap-1 py-2.5 text-xs text-muted-foreground" activeProps={{ className: "!text-primary" }}>
             <n.icon className="h-5 w-5" />{n.label}

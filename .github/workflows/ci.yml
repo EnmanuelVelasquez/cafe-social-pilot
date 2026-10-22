@@ -1,0 +1,39 @@
+name: CI — Tests, Typecheck & Build
+
+on:
+  push:
+    branches:
+      - main
+      - setup_multibrand_architecture_store
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - setup_multibrand_architecture_store
+
+jobs:
+  verify:
+    name: Typecheck, Vitest & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: TypeScript strict typecheck
+        run: npm run typecheck
+
+      - name: Run unit & integration tests (Vitest)
+        run: npm run test
+
+      - name: Build production bundle (Client + SSR)
+        run: npm run build
