@@ -233,7 +233,7 @@ function Activos() {
         return next;
       });
 
-      toast.success("Activo eliminado correctamente de Supabase");
+      toast.success("Activo eliminado correctamente");
     } catch (error: any) {
       console.error(error);
       toast.error(
