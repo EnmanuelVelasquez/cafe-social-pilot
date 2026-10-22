@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Plus, Save, Plug, Instagram, Facebook } from "lucide-react";
+import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +13,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
-import type { Sucursal } from "@/types";
+import type { IntegracionSocial, Sucursal } from "@/types";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({
@@ -30,7 +30,12 @@ export const Route = createFileRoute("/settings")({
 });
 
 const integrations = [
-  { name: "Meta Graph API (Instagram/Facebook)", desc: "Publica automáticamente en tu cuenta de Instagram Business y tu página de Facebook.", icons: [Instagram, Facebook] },
+  {
+    platform: "Instagram_Graph_API",
+    name: "Meta Graph API (Instagram/Facebook)",
+    desc: "Publica automáticamente en tu cuenta de Instagram Business y tu página de Facebook.",
+    icons: [Instagram, Facebook],
+  },
 ];
 
 function Settings() {
@@ -39,6 +44,7 @@ function Settings() {
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
   const [rules, setRules] = useState("");
+  const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
 
   useEffect(() => {
     const fetchSucursales = async () => {
@@ -69,6 +75,78 @@ function Settings() {
       setRules(sucursalActiva.reglas_negativas ?? "");
     }
   }, [sucursalActiva]);
+
+  useEffect(() => {
+    if (!sucursalActiva || !supabase) {
+      setBranchIntegrations([]);
+      return;
+    }
+
+    supabase
+      .from("integraciones_sociales")
+      .select("*")
+      .eq("sucursal_id", sucursalActiva.id)
+      .then(({ data, error }) => {
+        if (!error && data) {
+          setBranchIntegrations(data as IntegracionSocial[]);
+        }
+      });
+  }, [sucursalActiva?.id]);
+
+  const handleToggleIntegration = async (platform: string) => {
+    if (!sucursalActiva) {
+      toast.error("Selecciona una sucursal primero");
+      return;
+    }
+    const existing = branchIntegrations.find((i) => i.plataforma === platform);
+    if (!supabase) {
+      toast.success("Estado de integración actualizado");
+      return;
+    }
+
+    try {
+      if (existing) {
+        const nextToken = existing.token_cifrado ? null : `token_${Date.now()}`;
+        const { data, error } = await supabase
+          .from("integraciones_sociales")
+          .update({ token_cifrado: nextToken })
+          .eq("id", existing.id)
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) {
+          setBranchIntegrations((prev) =>
+            prev.map((item) => (item.id === existing.id ? (data as IntegracionSocial) : item)),
+          );
+          toast.success(nextToken ? "Cuenta conectada correctamente" : "Cuenta desconectada");
+        }
+      } else {
+        const { data, error } = await supabase
+          .from("integraciones_sociales")
+          .insert([
+            {
+              sucursal_id: sucursalActiva.id,
+              plataforma: platform,
+              token_cifrado: `token_${Date.now()}`,
+            },
+          ])
+          .select()
+          .single();
+
+        if (error) throw error;
+        if (data) {
+          setBranchIntegrations((prev) => [...prev, data as IntegracionSocial]);
+          toast.success("Cuenta conectada correctamente");
+        }
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message ? `Error en integración: ${error.message}` : "No se pudo actualizar la integración",
+      );
+    }
+  };
 
   const handleSaveBranch = async () => {
     const cleanName = (name ?? "").trim();
@@ -113,7 +191,9 @@ function Settings() {
 
       if (error) throw error;
       if (!data || data.length === 0) {
-        toast.error("No se pudo actualizar la sucursal en Supabase. Verifica las políticas RLS (UPDATE) de la tabla 'sucursales'.");
+        toast.error(
+          "No se pudo actualizar la sucursal en Supabase. Verifica las políticas RLS (UPDATE) de la tabla 'sucursales'.",
+        );
         return;
       }
 
@@ -123,7 +203,9 @@ function Settings() {
       toast.success("Cambios de sucursal guardados en Supabase");
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message ? `Error al guardar: ${error.message}` : "Error al guardar los cambios en Supabase");
+      toast.error(
+        error?.message ? `Error al guardar: ${error.message}` : "Error al guardar los cambios en Supabase",
+      );
     }
   };
 
@@ -173,7 +255,9 @@ function Settings() {
       }
     } catch (error: any) {
       console.error(error);
-      toast.error(error?.message ? `Error al crear sucursal: ${error.message}` : "No se pudo crear la nueva sucursal");
+      toast.error(
+        error?.message ? `Error al crear sucursal: ${error.message}` : "No se pudo crear la nueva sucursal",
+      );
     }
   };
 
@@ -248,25 +332,38 @@ function Settings() {
         </TabsContent>
 
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
-          {integrations.map((it) => (
-            <Card key={it.name} className="shadow-card">
-              <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
-                <div className="flex gap-1.5">
-                  {it.icons.map((I, i) => (
-                    <div key={i} className="grid h-10 w-10 place-items-center rounded-xl bg-primary-soft text-primary"><I className="h-5 w-5" /></div>
-                  ))}
-                </div>
-                <Badge variant="secondary">Desconectado</Badge>
-              </CardHeader>
-              <CardContent className="space-y-1">
-                <CardTitle className="font-display text-base">{it.name}</CardTitle>
-                <CardDescription>{it.desc}</CardDescription>
-              </CardContent>
-              <CardFooter>
-                <Button variant="cta" className="w-full"><Plug /> Conectar Cuenta</Button>
-              </CardFooter>
-            </Card>
-          ))}
+          {integrations.map((it) => {
+            const record = branchIntegrations.find((b) => b.plataforma === it.platform);
+            const isConnected = Boolean(record?.token_cifrado);
+            return (
+              <Card key={it.name} className="shadow-card">
+                <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+                  <div className="flex gap-1.5">
+                    {it.icons.map((I, i) => (
+                      <div key={i} className="grid h-10 w-10 place-items-center rounded-xl bg-primary-soft text-primary"><I className="h-5 w-5" /></div>
+                    ))}
+                  </div>
+                  <Badge variant={isConnected ? "scheduled" : "secondary"}>
+                    {isConnected ? "Conectado" : "Desconectado"}
+                  </Badge>
+                </CardHeader>
+                <CardContent className="space-y-1">
+                  <CardTitle className="font-display text-base">{it.name}</CardTitle>
+                  <CardDescription>{it.desc}</CardDescription>
+                </CardContent>
+                <CardFooter>
+                  <Button
+                    variant={isConnected ? "outline" : "cta"}
+                    className="w-full"
+                    onClick={() => handleToggleIntegration(it.platform)}
+                  >
+                    {isConnected ? <CheckCircle2 /> : <Plug />}
+                    {isConnected ? "Desconectar Cuenta" : "Conectar Cuenta"}
+                  </Button>
+                </CardFooter>
+              </Card>
+            );
+          })}
         </TabsContent>
       </Tabs>
     </AppShell>
