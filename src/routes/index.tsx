@@ -196,7 +196,7 @@ function Dashboard() {
 
     setIsGenerating(true);
     try {
-      const { aiResponse, matchedAsset } = await generateSocialPostForBranch(
+      const { aiResponse, matchedAsset, provider } = await generateSocialPostForBranch(
         sucursalActiva,
         branchAssets,
         posts.length,
@@ -206,6 +206,12 @@ function Dashboard() {
       const nextNetwork = posts.length % 2 === 0 ? "Instagram" : "Facebook";
       const scheduledDate = new Date(Date.now() + (posts.length + 1) * 3600 * 1000 * 6);
       const nextUses = matchedAsset.uses + 1;
+      const providerBadge =
+        provider === "openai"
+          ? " con OpenAI (gpt-4o-mini)"
+          : provider === "webhook"
+            ? " vía Webhook IA"
+            : "";
 
       if (!supabase) {
         const mockPost: PostData = {
@@ -224,7 +230,7 @@ function Dashboard() {
         setBranchAssets((prev) =>
           prev.map((a) => (a.id === matchedAsset.id ? { ...a, uses: nextUses } : a)),
         );
-        toast.success("Publicación generada con IA");
+        toast.success(`Publicación generada${providerBadge}`);
         return;
       }
 
@@ -272,8 +278,8 @@ function Dashboard() {
 
       toast.success(
         initialStatus === "programado"
-          ? "Publicación generada y programada automáticamente"
-          : "Publicación generada (Pendiente de Aprobación)",
+          ? `Publicación generada${providerBadge} y programada automáticamente`
+          : `Publicación generada${providerBadge} (Pendiente de Aprobación)`,
       );
     } catch (error: any) {
       console.error(error);

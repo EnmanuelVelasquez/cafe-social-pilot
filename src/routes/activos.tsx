@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Loader2, Pencil, Plus, Repeat, Store, Trash2, TriangleAlert } from "lucide-react";
+import { Loader2, Pencil, Plus, Repeat, Sparkles, Store, Trash2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -16,13 +16,13 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { analyzeAssetImageTags, fileToDataUrl } from "@/lib/ai-engine";
 import {
   assets as sampleAssets,
   countUnused,
   extractStoragePath,
   formatTagsString,
   hasAffectedRows,
-  inferTagsFromFilename,
   isLowStock,
   parseTags,
   validateAssetFile,
@@ -68,8 +68,14 @@ function Activos() {
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [tag, setTag] = useState("Todos");
   const [isUploading, setIsUploading] = useState(false);
+  const [isAnalyzingVision, setIsAnalyzingVision] = useState(false);
   const [deletingId, setDeletingId] = useState<string | number | null>(null);
-  const [editingTags, setEditingTags] = useState<{ id: string | number; draft: string } | null>(null);
+  const [editingTags, setEditingTags] = useState<{
+    id: string | number;
+    draft: string;
+    img: string;
+    name: string;
+  } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -133,7 +139,7 @@ function Activos() {
     }
 
     setIsUploading(true);
-    const loadingToast = toast.loading("Subiendo y etiquetando imagen...");
+    const loadingToast = toast.loading("Subiendo y analizando imagen con IA Vision...");
 
     try {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -149,7 +155,14 @@ function Activos() {
         data: { publicUrl },
       } = supabase.storage.from("galeria").getPublicUrl(fileName);
 
-      const autoTags = inferTagsFromFilename(file.name).join(", ");
+      const visionInputUrl = await fileToDataUrl(file).catch(() => publicUrl);
+      const { tags: analyzedTags, source: tagSource } = await analyzeAssetImageTags({
+        imageUrl: visionInputUrl || publicUrl,
+        filename: file.name,
+        branchName: sucursalActiva.nombre,
+      });
+
+      const autoTags = formatTagsString(analyzedTags.join(", "));
 
       const { data: inserted, error: insertError } = await supabase
         .from("activos")
@@ -171,7 +184,13 @@ function Activos() {
       }
 
       toast.dismiss(loadingToast);
-      toast.success("Imagen subida y etiquetada correctamente");
+      if (tagSource === "openai") {
+        toast.success("Imagen subida y etiquetada con OpenAI Vision (gpt-4o-mini)");
+      } else if (tagSource === "webhook") {
+        toast.success("Imagen subida y etiquetada por Webhook IA");
+      } else {
+        toast.success("Imagen subida y etiquetada correctamente");
+      }
     } catch (error: any) {
       console.error(error);
       toast.dismiss(loadingToast);
@@ -183,6 +202,32 @@ function Activos() {
     } finally {
       setIsUploading(false);
       event.target.value = "";
+    }
+  };
+
+  const handleAnalyzeEditingAssetWithVision = async () => {
+    if (!editingTags || !sucursalActiva) return;
+    setIsAnalyzingVision(true);
+    try {
+      const { tags: detectedTags, source } = await analyzeAssetImageTags({
+        imageUrl: editingTags.img,
+        filename: editingTags.name,
+        branchName: sucursalActiva.nombre,
+      });
+      const formatted = formatTagsString(detectedTags.join(", "));
+      setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
+      if (source === "openai") {
+        toast.success("Etiquetas generadas con OpenAI Vision (gpt-4o-mini)");
+      } else if (source === "webhook") {
+        toast.success("Etiquetas generadas por Webhook IA");
+      } else {
+        toast("Etiquetas sugeridas localmente (configura VITE_OPENAI_API_KEY para visión real)");
+      }
+    } catch (error: any) {
+      console.error(error);
+      toast.error("No se pudo analizar la imagen con IA");
+    } finally {
+      setIsAnalyzingVision(false);
     }
   };
 
@@ -409,6 +454,8 @@ function Activos() {
                       setEditingTags({
                         id: a.id,
                         draft: a.tags.join(", "),
+                        img: a.img,
+                        name: a.name,
                       })
                     }
                   >
@@ -460,8 +507,24 @@ function Activos() {
               Separa las etiquetas con comas (ej. #producto, #ambiente, #oferta) para el algoritmo de cruce de la IA.
             </DialogDescription>
           </DialogHeader>
-          <div className="space-y-2">
-            <Label htmlFor="asset-tags">Etiquetas visuales</Label>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <Label htmlFor="asset-tags">Etiquetas visuales</Label>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={isAnalyzingVision}
+                onClick={handleAnalyzeEditingAssetWithVision}
+              >
+                {isAnalyzingVision ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="h-3.5 w-3.5 text-violet" />
+                )}
+                {isAnalyzingVision ? "Analizando..." : "Sugerir con IA Vision"}
+              </Button>
+            </div>
             <Input
               id="asset-tags"
               value={editingTags?.draft ?? ""}

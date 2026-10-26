@@ -2,9 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   MAX_JSON_RETRIES,
+  OPENAI_CHAT_COMPLETIONS_URL,
+  OPENAI_DEFAULT_MODEL,
+  analyzeAssetImageTags,
   buildContextualDraft,
+  buildPostGenerationUserPrompt,
+  buildVisionTaggingPrompt,
+  callOpenAIVisionForTags,
+  generateSocialPostForBranch,
   generateWithRetry,
   parseAndValidateAIPostResponse,
+  parseAndValidateVisionTagsResponse,
   resolveInitialPostStatus,
   selectBestMatchingAsset,
 } from "@/lib/ai-engine";
@@ -103,5 +111,156 @@ describe("Algoritmo de Cruce y Control de Desgaste (REQ-3.2, REQ-2.3 y Riesgo 1)
     );
 
     expect(parseAndValidateAIPostResponse(draft).copy_text).toContain("Sede Norte");
+  });
+});
+
+describe("Visión Computacional y Auto-Tagging con OpenAI gpt-4o-mini (REQ-2.2)", () => {
+  it("normaliza y valida las etiquetas devueltas por el modelo de visión", () => {
+    const raw = `\`\`\`json
+    {
+      "tags": ["Producto", "#Latte Art", "ambiente", "PRODUCTO", "Café Especial"]
+    }
+    \`\`\``;
+
+    const tags = parseAndValidateVisionTagsResponse(raw);
+    expect(tags).toEqual(["#producto", "#latte_art", "#ambiente", "#café_especial"]);
+  });
+
+  it("rechaza respuestas de visión vacías o sin etiquetas válidas", () => {
+    expect(() => parseAndValidateVisionTagsResponse("{}")).toThrow();
+    expect(() => parseAndValidateVisionTagsResponse({ tags: [] })).toThrow();
+  });
+
+  it("construye el prompt de visión incluyendo el nombre de la sucursal", () => {
+    const prompt = buildVisionTaggingPrompt("Sede Chapinero");
+    expect(prompt).toContain("Sede Chapinero");
+    expect(prompt).toContain('"tags"');
+  });
+
+  it("invoca OpenAI Vision (gpt-4o-mini) con payload multimodal y devuelve tags normalizados", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                tags: ["#producto", "Capuchino Cremoso", "#ambiente"],
+              }),
+            },
+          },
+        ],
+      }),
+    });
+
+    const tags = await callOpenAIVisionForTags({
+      imageUrl: "data:image/jpeg;base64,AAA",
+      apiKey: "sk-test-key",
+      branchName: "Sede Centro",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    expect(tags).toEqual(["#producto", "#capuchino_cremoso", "#ambiente"]);
+    expect(mockFetch).toHaveBeenCalledWith(
+      OPENAI_CHAT_COMPLETIONS_URL,
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer sk-test-key",
+        }),
+      }),
+    );
+
+    const requestBody = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(requestBody.model).toBe(OPENAI_DEFAULT_MODEL);
+    expect(requestBody.messages[1].content[1]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/jpeg;base64,AAA", detail: "low" },
+    });
+  });
+
+  it("usa fallback por nombre de archivo si OpenAI Vision falla o no hay API key", async () => {
+    const failingFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+    });
+
+    const result = await analyzeAssetImageTags({
+      imageUrl: "https://example.com/cosecha-huila.jpg",
+      filename: "cosecha-huila.jpg",
+      apiKey: "sk-test-key",
+      fetchFn: failingFetch as unknown as typeof fetch,
+    });
+
+    expect(result.source).toBe("filename_fallback");
+    expect(result.tags).toEqual(["#cosecha", "#huila"]);
+  });
+});
+
+describe("Generación de Copy con OpenAI gpt-4o-mini y Reintentos (REQ-1.2, REQ-3.1, REQ-3.2)", () => {
+  it("construye el prompt de usuario con las etiquetas disponibles en la sucursal", () => {
+    const prompt = buildPostGenerationUserPrompt({
+      branchName: "Sede Norte",
+      availableTags: ["#producto", "#origen"],
+      variantIndex: 1,
+    });
+    expect(prompt).toContain("Sede Norte");
+    expect(prompt).toContain("producto, origen");
+    expect(prompt).toContain("recommended_visual_tags");
+  });
+
+  it("genera el post con OpenAI gpt-4o-mini, reintenta ante alucinación JSON y cruza el mejor activo", async () => {
+    const mockFetch = vi
+      .fn()
+      // Primer intento: JSON corrupto
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [{ message: { content: "respuesta no json" } }],
+        }),
+      })
+      // Segundo intento: JSON válido cumpliendo el contrato REQ-3.1
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  post_type: "FEED_SINGLE",
+                  copy_text: "Descubre el origen del Huila en cada taza ☕🌱 #CafeDeOrigen",
+                  recommended_visual_tags: ["origen", "educativo"],
+                  call_to_action_used: true,
+                }),
+              },
+            },
+          ],
+        }),
+      });
+
+    const result = await generateSocialPostForBranch(
+      {
+        id: "suc-1",
+        nombre: "Sede Centro",
+        tono: "Inspirador",
+        reglas_negativas: "Nunca mencionar la palabra barato",
+      },
+      mockAssets,
+      0,
+      {
+        apiKey: "sk-openai-key",
+        fetchFn: mockFetch as unknown as typeof fetch,
+      },
+    );
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.provider).toBe("openai");
+    expect(result.aiResponse.copy_text).toContain("Huila");
+    expect(result.matchedAsset.id).toBe("a-2");
+    expect(
+      result.systemPrompt.endsWith(
+        "Bajo ninguna circunstancia debes mencionar o hacer alusión a lo siguiente: [Nunca mencionar la palabra barato]",
+      ),
+    ).toBe(true);
   });
 });
