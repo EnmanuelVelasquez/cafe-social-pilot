@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - main
+      - connect_real_llm_vision
       - setup_multibrand_architecture_store
       - "feature/**"
   pull_request:
     branches:
       - main
+      - connect_real_llm_vision
       - setup_multibrand_architecture_store
 
 jobs:

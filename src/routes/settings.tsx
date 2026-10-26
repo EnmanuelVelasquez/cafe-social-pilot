@@ -1,8 +1,17 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2 } from "lucide-react";
+import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2, Trash2, Loader2, TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -11,6 +20,7 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { extractStoragePath, hasAffectedRows } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { IntegracionSocial, Sucursal } from "@/types";
@@ -39,12 +49,14 @@ const integrations = [
 ];
 
 function Settings() {
-  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
+  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva, removeSucursal } = useBranchStore();
 
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
   const [rules, setRules] = useState("");
   const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [isDeletingBranch, setIsDeletingBranch] = useState(false);
 
   useEffect(() => {
     const fetchSucursales = async () => {
@@ -73,6 +85,10 @@ function Settings() {
       setName(sucursalActiva.nombre ?? "");
       setTone(sucursalActiva.tono ?? "");
       setRules(sucursalActiva.reglas_negativas ?? "");
+    } else {
+      setName("");
+      setTone("");
+      setRules("");
     }
   }, [sucursalActiva]);
 
@@ -261,6 +277,76 @@ function Settings() {
     }
   };
 
+  const handleDeleteBranch = async () => {
+    if (!sucursalActiva) return;
+    const branchToDelete = sucursalActiva;
+    setIsDeletingBranch(true);
+
+    if (!supabase) {
+      removeSucursal(branchToDelete.id);
+      setIsDeletingBranch(false);
+      setConfirmDeleteOpen(false);
+      toast.success(`Sucursal "${branchToDelete.nombre}" eliminada`);
+      return;
+    }
+
+    try {
+      const { data: branchAssets } = await supabase
+        .from("activos")
+        .select("id, url_imagen")
+        .eq("sucursal_id", branchToDelete.id);
+
+      await supabase.from("publicaciones").delete().eq("sucursal_id", branchToDelete.id);
+      await supabase.from("integraciones_sociales").delete().eq("sucursal_id", branchToDelete.id);
+      await supabase.from("activos").delete().eq("sucursal_id", branchToDelete.id);
+
+      const { data: deletedRows, error: deleteError } = await supabase
+        .from("sucursales")
+        .delete()
+        .eq("id", branchToDelete.id)
+        .select();
+
+      if (deleteError) {
+        if (deleteError.code === "23503") {
+          toast.error(
+            "No se pudo eliminar la sucursal porque aún tiene registros vinculados en Supabase.",
+          );
+          return;
+        }
+        throw deleteError;
+      }
+
+      if (!hasAffectedRows(deletedRows)) {
+        toast.error(
+          "Supabase bloqueó el borrado (0 filas afectadas). Activa la política RLS de DELETE para la tabla 'sucursales' en Supabase.",
+        );
+        return;
+      }
+
+      if (branchAssets && branchAssets.length > 0) {
+        const storagePaths = branchAssets
+          .map((a: any) => extractStoragePath(a.url_imagen || "", "galeria"))
+          .filter((p): p is string => Boolean(p));
+        if (storagePaths.length > 0) {
+          await supabase.storage.from("galeria").remove(storagePaths);
+        }
+      }
+
+      removeSucursal(branchToDelete.id);
+      setConfirmDeleteOpen(false);
+      toast.success(`Sucursal "${branchToDelete.nombre}" eliminada correctamente`);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al eliminar sucursal: ${error.message}`
+          : "No se pudo eliminar la sucursal",
+      );
+    } finally {
+      setIsDeletingBranch(false);
+    }
+  };
+
   return (
     <AppShell title="Configuración de Espacio" subtitle="Administra tus sucursales y conexiones con redes sociales">
       <Tabs defaultValue="sucursales" className="space-y-5">
@@ -302,6 +388,7 @@ function Settings() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Ej. Sede Centro"
+                  disabled={!sucursalActiva}
                 />
               </div>
               <div className="space-y-2">
@@ -311,7 +398,8 @@ function Settings() {
                   rows={3}
                   value={tone}
                   onChange={(e) => setTone(e.target.value)}
-                  placeholder="Ej. Cercano y cálido, como un barista que conoce a sus clientes por su nombre."
+                  placeholder="Ej. Cercano y cálido, profesional o corporativo según la identidad de la sede."
+                  disabled={!sucursalActiva}
                 />
               </div>
               <div className="space-y-2">
@@ -322,13 +410,53 @@ function Settings() {
                   value={rules}
                   onChange={(e) => setRules(e.target.value)}
                   placeholder={'Nunca mencionar a la competencia. No usar "barato" ni "instantáneo".'}
+                  disabled={!sucursalActiva}
                 />
               </div>
             </CardContent>
-            <CardFooter className="justify-end">
-              <Button variant="cta" onClick={handleSaveBranch}><Save /> Guardar Cambios</Button>
+            <CardFooter className="flex flex-wrap items-center justify-between gap-3">
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={!sucursalActiva || isDeletingBranch}
+                onClick={() => setConfirmDeleteOpen(true)}
+              >
+                <Trash2 /> Eliminar Sucursal
+              </Button>
+              <Button variant="cta" disabled={!sucursalActiva} onClick={handleSaveBranch}>
+                <Save /> Guardar Cambios
+              </Button>
             </CardFooter>
           </Card>
+
+          <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="flex items-center gap-2">
+                  <TriangleAlert className="h-5 w-5 text-destructive" />
+                  ¿Estás seguro de eliminar esta sucursal?
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  Vas a eliminar permanentemente la sucursal{" "}
+                  <strong className="text-foreground">"{sucursalActiva?.nombre}"</strong> junto con
+                  sus publicaciones, activos e integraciones vinculadas. Esta acción no se puede
+                  deshacer.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={isDeletingBranch}>Cancelar</AlertDialogCancel>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  disabled={isDeletingBranch}
+                  onClick={handleDeleteBranch}
+                >
+                  {isDeletingBranch ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                  {isDeletingBranch ? "Eliminando..." : "Sí, eliminar sucursal"}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </TabsContent>
 
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
