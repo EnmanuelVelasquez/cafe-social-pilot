@@ -13,6 +13,7 @@ import {
   generateWithRetry,
   parseAndValidateAIPostResponse,
   parseAndValidateVisionTagsResponse,
+  resolveGeminiModel,
   resolveInitialPostStatus,
   selectBestMatchingAsset,
 } from "@/lib/ai-engine";
@@ -135,6 +136,13 @@ describe("Visión Computacional y Auto-Tagging con Google Gemini (REQ-2.2)", () 
     const prompt = buildVisionTaggingPrompt("Clínica Dental Sonrisa");
     expect(prompt).toContain("Clínica Dental Sonrisa");
     expect(prompt).toContain('"tags"');
+  });
+
+  it("actualiza automáticamente modelos retirados como gemini-2.5-flash a gemini-3.8-flash", () => {
+    expect(GEMINI_DEFAULT_MODEL).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("gemini-2.5-flash")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("models/gemini-2.5-flash")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel(undefined)).toBe("gemini-3.8-flash");
   });
 
   it("invoca Gemini Vision (gemini-2.5-flash) con inlineData y devuelve tags normalizados", async () => {

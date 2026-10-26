@@ -185,7 +185,7 @@ function Activos() {
 
       toast.dismiss(loadingToast);
       if (tagSource === "gemini") {
-        toast.success("Imagen subida y etiquetada con Gemini Vision (gemini-2.5-flash)");
+        toast.success("Imagen subida y etiquetada con Gemini Vision (gemini-3.8-flash)");
       } else if (tagSource === "webhook") {
         toast.success("Imagen subida y etiquetada por Webhook IA");
       } else {
@@ -218,7 +218,7 @@ function Activos() {
       const formatted = formatTagsString(detectedTags.join(", "));
       setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
       if (source === "gemini") {
-        toast.success("Etiquetas generadas con Gemini Vision (gemini-2.5-flash)");
+        toast.success("Etiquetas generadas con Gemini Vision (gemini-3.8-flash)");
       } else {
         toast.success("Etiquetas generadas por Webhook IA");
       }

@@ -209,7 +209,7 @@ function Dashboard() {
       const nextUses = matchedAsset.uses + 1;
       const providerBadge =
         provider === "gemini"
-          ? " con Gemini (gemini-2.5-flash)"
+          ? " con Gemini (gemini-3.8-flash)"
           : " vía Webhook IA";
 
       if (!supabase) {

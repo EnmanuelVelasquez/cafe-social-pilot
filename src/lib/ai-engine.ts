@@ -6,8 +6,28 @@ export type AIPostType = "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY";
 export type AIProviderSource = "gemini" | "webhook";
 export type VisionTagSource = "gemini" | "webhook" | "filename_fallback";
 
-export const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
+export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
 export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+
+const RETIRED_GEMINI_MODELS = new Set([
+  "gemini-1.5-flash",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash",
+]);
+
+/**
+ * Normaliza el identificador del modelo Gemini y actualiza automáticamente
+ * nombres de modelos retirados (ej. `gemini-2.5-flash`) a `gemini-3.8-flash`.
+ */
+export function resolveGeminiModel(rawModel?: string | undefined): string {
+  const cleaned = (rawModel ?? "")
+    .trim()
+    .replace(/^models\//i, "");
+  if (!cleaned || RETIRED_GEMINI_MODELS.has(cleaned.toLowerCase())) {
+    return GEMINI_DEFAULT_MODEL;
+  }
+  return cleaned;
+}
 
 /**
  * REQ-3.1: Contrato JSON estricto devuelto por el motor de IA.
@@ -41,7 +61,7 @@ export class AIProviderHttpError extends Error {
 }
 
 export function buildGeminiEndpoint(model: string, apiKey: string): string {
-  const safeModel = encodeURIComponent(model || GEMINI_DEFAULT_MODEL);
+  const safeModel = encodeURIComponent(resolveGeminiModel(model));
   const safeKey = encodeURIComponent(apiKey);
   return `${GEMINI_API_BASE_URL}/${safeModel}:generateContent?key=${safeKey}`;
 }
@@ -334,11 +354,9 @@ export async function analyzeAssetImageTags(options: {
     (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
     ""
   ).trim();
-  const model = (
-    options.model ??
-    (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined) ??
-    GEMINI_DEFAULT_MODEL
-  ).trim();
+  const model = resolveGeminiModel(
+    options.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
   const allowFallback = options.allowFilenameFallback ?? true;
   const fetchImpl = options.fetchFn ?? fetch;
   const imageUrl = options.imageUrl?.trim();
@@ -654,11 +672,9 @@ export async function generateSocialPostForBranch(
     (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
     ""
   ).trim();
-  const model = (
-    options?.model ??
-    (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined) ??
-    GEMINI_DEFAULT_MODEL
-  ).trim();
+  const model = resolveGeminiModel(
+    options?.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
   const fetchImpl = options?.fetchFn ?? fetch;
 
   if (!apiKey && !webhookUrl) {
