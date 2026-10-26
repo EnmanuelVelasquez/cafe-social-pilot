@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  GEMINI_DEFAULT_MODEL,
   MAX_JSON_RETRIES,
-  OPENAI_CHAT_COMPLETIONS_URL,
-  OPENAI_DEFAULT_MODEL,
   analyzeAssetImageTags,
-  buildContextualDraft,
+  buildGeminiEndpoint,
   buildPostGenerationUserPrompt,
   buildVisionTaggingPrompt,
-  callOpenAIVisionForTags,
+  callGeminiVisionForTags,
+  extractInlineDataFromDataUrl,
   generateSocialPostForBranch,
   generateWithRetry,
   parseAndValidateAIPostResponse,
@@ -19,9 +19,9 @@ import {
 import type { Asset } from "@/lib/data";
 
 const mockAssets: Asset[] = [
-  { id: "a-1", img: "url-1", name: "Taza", tags: ["#producto", "#ambiente"], uses: 5 },
-  { id: "a-2", img: "url-2", name: "Cosecha", tags: ["#origen", "#educativo"], uses: 2 },
-  { id: "a-3", img: "url-3", name: "Latte Nuevo", tags: ["#producto", "#ambiente"], uses: 0 },
+  { id: "a-1", img: "url-1", name: "Activo 1", tags: ["#producto", "#ambiente"], uses: 5 },
+  { id: "a-2", img: "url-2", name: "Activo 2", tags: ["#origen", "#educativo"], uses: 2 },
+  { id: "a-3", img: "url-3", name: "Activo 3", tags: ["#producto", "#ambiente"], uses: 0 },
 ];
 
 describe("Validador JSON y Reintentos del Motor IA (REQ-3.1 y Riesgo 2)", () => {
@@ -99,31 +99,23 @@ describe("Algoritmo de Cruce y Control de Desgaste (REQ-3.2, REQ-2.3 y Riesgo 1)
     expect(resolveInitialPostStatus(false)).toBe("pendiente");
     expect(resolveInitialPostStatus(true)).toBe("programado");
   });
-
-  it("construye un borrador contextual válido para la sucursal", () => {
-    const draft = buildContextualDraft(
-      {
-        nombre: "Sede Norte",
-        tono: "Profesional",
-        reglas_negativas: "No usar barato",
-      },
-      mockAssets,
-    );
-
-    expect(parseAndValidateAIPostResponse(draft).copy_text).toContain("Sede Norte");
-  });
 });
 
-describe("Visión Computacional y Auto-Tagging con OpenAI gpt-4o-mini (REQ-2.2)", () => {
+describe("Visión Computacional y Auto-Tagging con Google Gemini (REQ-2.2)", () => {
   it("normaliza y valida las etiquetas devueltas por el modelo de visión", () => {
     const raw = `\`\`\`json
     {
-      "tags": ["Producto", "#Latte Art", "ambiente", "PRODUCTO", "Café Especial"]
+      "tags": ["Producto", "#Consultoria Financiera", "ambiente", "PRODUCTO", "Equipo Corporativo"]
     }
     \`\`\``;
 
     const tags = parseAndValidateVisionTagsResponse(raw);
-    expect(tags).toEqual(["#producto", "#latte_art", "#ambiente", "#café_especial"]);
+    expect(tags).toEqual([
+      "#producto",
+      "#consultoria_financiera",
+      "#ambiente",
+      "#equipo_corporativo",
+    ]);
   });
 
   it("rechaza respuestas de visión vacías o sin etiquetas válidas", () => {
@@ -131,107 +123,129 @@ describe("Visión Computacional y Auto-Tagging con OpenAI gpt-4o-mini (REQ-2.2)"
     expect(() => parseAndValidateVisionTagsResponse({ tags: [] })).toThrow();
   });
 
-  it("construye el prompt de visión incluyendo el nombre de la sucursal", () => {
-    const prompt = buildVisionTaggingPrompt("Sede Chapinero");
-    expect(prompt).toContain("Sede Chapinero");
+  it("extrae mimeType y base64 de un Data URL válido", () => {
+    expect(extractInlineDataFromDataUrl("data:image/webp;base64,UklGRg==")).toEqual({
+      mimeType: "image/webp",
+      data: "UklGRg==",
+    });
+    expect(extractInlineDataFromDataUrl("https://example.com/foto.jpg")).toBeNull();
+  });
+
+  it("construye el prompt de visión agnóstico al giro de negocio incluyendo el nombre de la marca", () => {
+    const prompt = buildVisionTaggingPrompt("Clínica Dental Sonrisa");
+    expect(prompt).toContain("Clínica Dental Sonrisa");
     expect(prompt).toContain('"tags"');
   });
 
-  it("invoca OpenAI Vision (gpt-4o-mini) con payload multimodal y devuelve tags normalizados", async () => {
+  it("invoca Gemini Vision (gemini-2.5-flash) con inlineData y devuelve tags normalizados", async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({
-        choices: [
+        candidates: [
           {
-            message: {
-              content: JSON.stringify({
-                tags: ["#producto", "Capuchino Cremoso", "#ambiente"],
-              }),
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    tags: ["#servicio", "Consultorio Moderno", "#ambiente"],
+                  }),
+                },
+              ],
             },
           },
         ],
       }),
     });
 
-    const tags = await callOpenAIVisionForTags({
+    const tags = await callGeminiVisionForTags({
       imageUrl: "data:image/jpeg;base64,AAA",
-      apiKey: "sk-test-key",
-      branchName: "Sede Centro",
+      apiKey: "AIzaSy-test-key",
+      branchName: "Clínica Norte",
       fetchFn: mockFetch as unknown as typeof fetch,
     });
 
-    expect(tags).toEqual(["#producto", "#capuchino_cremoso", "#ambiente"]);
+    expect(tags).toEqual(["#servicio", "#consultorio_moderno", "#ambiente"]);
     expect(mockFetch).toHaveBeenCalledWith(
-      OPENAI_CHAT_COMPLETIONS_URL,
+      buildGeminiEndpoint(GEMINI_DEFAULT_MODEL, "AIzaSy-test-key"),
       expect.objectContaining({
         method: "POST",
-        headers: expect.objectContaining({
-          Authorization: "Bearer sk-test-key",
-        }),
       }),
     );
 
     const requestBody = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
-    expect(requestBody.model).toBe(OPENAI_DEFAULT_MODEL);
-    expect(requestBody.messages[1].content[1]).toEqual({
-      type: "image_url",
-      image_url: { url: "data:image/jpeg;base64,AAA", detail: "low" },
+    expect(requestBody.contents[0].parts[1]).toEqual({
+      inlineData: { mimeType: "image/jpeg", data: "AAA" },
     });
   });
 
-  it("usa fallback por nombre de archivo si OpenAI Vision falla o no hay API key", async () => {
+  it("permite guardar usando palabras del archivo en subida inicial si la IA falla, pero exige IA cuando allowFilenameFallback es false", async () => {
     const failingFetch = vi.fn().mockResolvedValue({
       ok: false,
       status: 500,
     });
 
-    const result = await analyzeAssetImageTags({
-      imageUrl: "https://example.com/cosecha-huila.jpg",
-      filename: "cosecha-huila.jpg",
-      apiKey: "sk-test-key",
+    const uploadResult = await analyzeAssetImageTags({
+      imageUrl: "data:image/jpeg;base64,AAA",
+      filename: "finanzas-corporativas.jpg",
+      apiKey: "AIzaSy-test-key",
+      allowFilenameFallback: true,
       fetchFn: failingFetch as unknown as typeof fetch,
     });
 
-    expect(result.source).toBe("filename_fallback");
-    expect(result.tags).toEqual(["#cosecha", "#huila"]);
+    expect(uploadResult.source).toBe("filename_fallback");
+    expect(uploadResult.tags).toEqual(["#finanzas", "#corporativas"]);
+
+    await expect(
+      analyzeAssetImageTags({
+        imageUrl: "data:image/jpeg;base64,AAA",
+        filename: "finanzas-corporativas.jpg",
+        apiKey: "",
+        webhookUrl: "",
+        allowFilenameFallback: false,
+      }),
+    ).rejects.toThrow(/VITE_GEMINI_API_KEY/);
   });
 });
 
-describe("Generación de Copy con OpenAI gpt-4o-mini y Reintentos (REQ-1.2, REQ-3.1, REQ-3.2)", () => {
-  it("construye el prompt de usuario con las etiquetas disponibles en la sucursal", () => {
+describe("Generación de Copy con Google Gemini sin fallback local (REQ-1.2, REQ-3.1, REQ-3.2)", () => {
+  it("construye el prompt de usuario agnóstico al giro con las etiquetas disponibles en la sucursal", () => {
     const prompt = buildPostGenerationUserPrompt({
-      branchName: "Sede Norte",
-      availableTags: ["#producto", "#origen"],
+      branchName: "TechCorp Soluciones",
+      availableTags: ["#servicio", "#comunidad"],
       variantIndex: 1,
     });
-    expect(prompt).toContain("Sede Norte");
-    expect(prompt).toContain("producto, origen");
+    expect(prompt).toContain("TechCorp Soluciones");
+    expect(prompt).toContain("servicio, comunidad");
     expect(prompt).toContain("recommended_visual_tags");
   });
 
-  it("genera el post con OpenAI gpt-4o-mini, reintenta ante alucinación JSON y cruza el mejor activo", async () => {
+  it("genera el post con Gemini (gemini-2.5-flash), reintenta ante alucinación JSON y cruza el mejor activo", async () => {
     const mockFetch = vi
       .fn()
       // Primer intento: JSON corrupto
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          choices: [{ message: { content: "respuesta no json" } }],
+          candidates: [{ content: { parts: [{ text: "respuesta no json" }] } }],
         }),
       })
       // Segundo intento: JSON válido cumpliendo el contrato REQ-3.1
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
-          choices: [
+          candidates: [
             {
-              message: {
-                content: JSON.stringify({
-                  post_type: "FEED_SINGLE",
-                  copy_text: "Descubre el origen del Huila en cada taza ☕🌱 #CafeDeOrigen",
-                  recommended_visual_tags: ["origen", "educativo"],
-                  call_to_action_used: true,
-                }),
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      post_type: "FEED_SINGLE",
+                      copy_text: "Impulsa el crecimiento de tu empresa hoy 🚀 #Innovacion",
+                      recommended_visual_tags: ["origen", "educativo"],
+                      call_to_action_used: true,
+                    }),
+                  },
+                ],
               },
             },
           ],
@@ -241,26 +255,75 @@ describe("Generación de Copy con OpenAI gpt-4o-mini y Reintentos (REQ-1.2, REQ-
     const result = await generateSocialPostForBranch(
       {
         id: "suc-1",
-        nombre: "Sede Centro",
-        tono: "Inspirador",
+        nombre: "TechCorp Norte",
+        tono: "Profesional",
         reglas_negativas: "Nunca mencionar la palabra barato",
       },
       mockAssets,
       0,
       {
-        apiKey: "sk-openai-key",
+        apiKey: "AIzaSy-gemini-key",
         fetchFn: mockFetch as unknown as typeof fetch,
       },
     );
 
     expect(mockFetch).toHaveBeenCalledTimes(2);
-    expect(result.provider).toBe("openai");
-    expect(result.aiResponse.copy_text).toContain("Huila");
+    expect(result.provider).toBe("gemini");
+    expect(result.aiResponse.copy_text).toContain("crecimiento");
     expect(result.matchedAsset.id).toBe("a-2");
     expect(
       result.systemPrompt.endsWith(
         "Bajo ninguna circunstancia debes mencionar o hacer alusión a lo siguiente: [Nunca mencionar la palabra barato]",
       ),
     ).toBe(true);
+  });
+
+  it("lanza error claro cuando no hay API Key ni Webhook configurado o cuando Gemini devuelve 429", async () => {
+    await expect(
+      generateSocialPostForBranch(
+        {
+          id: "suc-1",
+          nombre: "Marca X",
+          tono: "Corporativo",
+          reglas_negativas: "No usar barato",
+        },
+        mockAssets,
+        0,
+        {
+          apiKey: "",
+          webhookUrl: "",
+        },
+      ),
+    ).rejects.toThrow(/VITE_GEMINI_API_KEY/);
+
+    const mockFetch429 = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: {
+          status: "RESOURCE_EXHAUSTED",
+          message: "Quota exceeded for metric",
+        },
+      }),
+    });
+
+    await expect(
+      generateSocialPostForBranch(
+        {
+          id: "suc-1",
+          nombre: "Marca X",
+          tono: "Corporativo",
+          reglas_negativas: "No usar barato",
+        },
+        mockAssets,
+        0,
+        {
+          apiKey: "AIzaSy-rate-limited",
+          fetchFn: mockFetch429 as unknown as typeof fetch,
+        },
+      ),
+    ).rejects.toThrow(/429/);
+
+    expect(mockFetch429).toHaveBeenCalledTimes(1);
   });
 });

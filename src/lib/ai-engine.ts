@@ -3,11 +3,11 @@ import { inferTagsFromFilename, type Asset } from "@/lib/data";
 import type { Sucursal } from "@/types";
 
 export type AIPostType = "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY";
-export type AIProviderSource = "openai" | "webhook" | "local_fallback";
-export type VisionTagSource = "openai" | "webhook" | "filename_fallback";
+export type AIProviderSource = "gemini" | "webhook";
+export type VisionTagSource = "gemini" | "webhook" | "filename_fallback";
 
-export const OPENAI_DEFAULT_MODEL = "gpt-4o-mini";
-export const OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions";
+export const GEMINI_DEFAULT_MODEL = "gemini-2.5-flash";
+export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /**
  * REQ-3.1: Contrato JSON estricto devuelto por el motor de IA.
@@ -23,6 +23,69 @@ export interface AIPostResponse {
 export const MAX_JSON_RETRIES = 2;
 
 const VALID_POST_TYPES: readonly AIPostType[] = ["FEED_SINGLE", "FEED_CAROUSEL", "STORY"];
+
+/**
+ * Error de transporte HTTP o cuota del proveedor (ej. 400/403 API Key inválida, 429 límite de cuota, 500).
+ * No debe reintentarse como si fuera una alucinación de formato JSON.
+ */
+export class AIProviderHttpError extends Error {
+  readonly status: number;
+  readonly code?: string | undefined;
+
+  constructor(message: string, status: number, code?: string | undefined) {
+    super(message);
+    this.name = "AIProviderHttpError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function buildGeminiEndpoint(model: string, apiKey: string): string {
+  const safeModel = encodeURIComponent(model || GEMINI_DEFAULT_MODEL);
+  const safeKey = encodeURIComponent(apiKey);
+  return `${GEMINI_API_BASE_URL}/${safeModel}:generateContent?key=${safeKey}`;
+}
+
+async function buildGeminiHttpError(
+  response: Response,
+  contextLabel: string,
+): Promise<AIProviderHttpError> {
+  let code: string | undefined;
+  let apiMessage: string | undefined;
+  try {
+    const errJson = (await response.json()) as {
+      error?: { status?: string; code?: number; message?: string };
+    };
+    code = errJson?.error?.status;
+    apiMessage = errJson?.error?.message;
+  } catch {
+    // Ignorar si el cuerpo de error no es JSON
+  }
+
+  if (response.status === 429) {
+    return new AIProviderHttpError(
+      `${contextLabel} respondió con estado 429 (límite de peticiones por minuto alcanzado en Gemini API)`,
+      429,
+      code ?? "RESOURCE_EXHAUSTED",
+    );
+  }
+
+  if (response.status === 400 || response.status === 401 || response.status === 403) {
+    const detail = apiMessage ? `: ${apiMessage}` : "";
+    return new AIProviderHttpError(
+      `${contextLabel} respondió con estado ${response.status} (verifica tu VITE_GEMINI_API_KEY)${detail}`,
+      response.status,
+      code,
+    );
+  }
+
+  const detail = apiMessage ? `: ${apiMessage}` : "";
+  return new AIProviderHttpError(
+    `${contextLabel} respondió con estado ${response.status}${detail}`,
+    response.status,
+    code,
+  );
+}
 
 function normalizeTag(tag: string): string {
   return tag.replace(/^#+/, "").trim().toLowerCase();
@@ -47,16 +110,67 @@ function stripMarkdownCodeFence(text: string): string {
 }
 
 /**
- * REQ-2.2: Construye el prompt para que el modelo de visión analice un activo
- * y devuelva etiquetas descriptivas en formato JSON estricto.
+ * Extrae `mimeType` y `data` (base64 puro) a partir de un Data URL (`data:image/jpeg;base64,...`).
+ */
+export function extractInlineDataFromDataUrl(
+  dataUrl: string,
+): { mimeType: string; data: string } | null {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl.trim());
+  if (!match || !match[1] || !match[2]) return null;
+  return {
+    mimeType: match[1].trim(),
+    data: match[2].trim(),
+  };
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Resuelve un Data URL o una URL pública de imagen a `{ mimeType, data }` en base64
+ * para enviarlo en `inlineData` a Gemini Vision.
+ */
+export async function resolveImageToInlineData(
+  imageUrl: string,
+  fetchFn?: typeof fetch | undefined,
+): Promise<{ mimeType: string; data: string }> {
+  const fromDataUrl = extractInlineDataFromDataUrl(imageUrl);
+  if (fromDataUrl) {
+    return fromDataUrl;
+  }
+
+  const fetchImpl = fetchFn ?? fetch;
+  const response = await fetchImpl(imageUrl);
+  if (!response.ok) {
+    throw new Error(`No se pudo descargar la imagen para análisis visual (${response.status})`);
+  }
+
+  const contentType = response.headers?.get?.("content-type") || "image/jpeg";
+  const mimeType = contentType.split(";")[0]?.trim() || "image/jpeg";
+  const buffer = await response.arrayBuffer();
+  return {
+    mimeType,
+    data: arrayBufferToBase64(buffer),
+  };
+}
+
+/**
+ * REQ-2.2: Construye el prompt agnóstico al giro de negocio para que el modelo de visión
+ * analice un activo y devuelva etiquetas descriptivas en formato JSON estricto.
  */
 export function buildVisionTaggingPrompt(branchName?: string): string {
-  const brandContext = branchName ? ` de la marca/sucursal "${branchName}"` : "";
+  const brandContext = branchName ? ` para la marca o sucursal "${branchName}"` : "";
   return [
-    `Analiza visualmente esta fotografía${brandContext}.`,
-    "Identifica los elementos visuales principales (producto, bebida, empaque, ambiente del local, personas, cosecha/origen, promoción, etc.).",
-    'Devuelve ÚNICAMENTE un objeto JSON válido con la propiedad "tags" que contenga entre 3 y 5 etiquetas en español en minúsculas con prefijo #.',
-    'Incluye al menos una categoría base (#producto, #ambiente, #origen, #comunidad, #educativo u #oferta) además de etiquetas descriptivas específicas (ej. {"tags": ["#producto", "#latte_art", "#taza", "#ambiente"]}).',
+    `Analiza visualmente esta imagen${brandContext}.`,
+    "Identifica los elementos visuales principales (producto, servicio, personas, equipo, instalaciones, ambiente, promoción, infografía o contexto visual).",
+    'Devuelve ÚNICAMENTE un objeto JSON válido con la propiedad "tags" que contenga entre 3 y 5 etiquetas descriptivas en español en minúsculas con prefijo #.',
+    'Incluye al menos una categoría funcional (#producto, #servicio, #ambiente, #comunidad, #educativo u #oferta) junto con etiquetas específicas de lo que aparece en la imagen (ej. {"tags": ["#producto", "#ambiente", "#detalle_visual"]}).',
   ].join(" ");
 }
 
@@ -106,7 +220,7 @@ export function parseAndValidateVisionTagsResponse(raw: unknown): string[] {
 
 /**
  * Convierte un archivo o Blob de imagen en un Data URL (base64) para enviarlo
- * directamente a OpenAI Vision (`gpt-4o-mini`).
+ * directamente a Gemini Vision (`gemini-2.5-flash`).
  */
 export function fileToDataUrl(file: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -128,9 +242,9 @@ export function fileToDataUrl(file: Blob): Promise<string> {
 }
 
 /**
- * REQ-2.2: Invoca OpenAI `gpt-4o-mini` con capacidades de Visión para etiquetar una imagen.
+ * REQ-2.2: Invoca Google Gemini (`gemini-2.5-flash`) con capacidades de Visión para etiquetar una imagen.
  */
-export async function callOpenAIVisionForTags(params: {
+export async function callGeminiVisionForTags(params: {
   imageUrl: string;
   apiKey: string;
   branchName?: string | undefined;
@@ -138,60 +252,67 @@ export async function callOpenAIVisionForTags(params: {
   fetchFn?: typeof fetch | undefined;
 }): Promise<string[]> {
   const fetchImpl = params.fetchFn ?? fetch;
-  const model = params.model || OPENAI_DEFAULT_MODEL;
+  const model = params.model || GEMINI_DEFAULT_MODEL;
+  const inlineData = await resolveImageToInlineData(params.imageUrl, fetchImpl);
+  const endpoint = buildGeminiEndpoint(model, params.apiKey);
 
-  const response = await fetchImpl(OPENAI_CHAT_COMPLETIONS_URL, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey}`,
     },
     body: JSON.stringify({
-      model,
-      response_format: { type: "json_object" },
-      temperature: 0.2,
-      max_tokens: 200,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Eres un asistente experto en visión computacional para marketing gastronómico y de cafeterías. Responde siempre con un objeto JSON válido.",
-        },
+      systemInstruction: {
+        parts: [
+          {
+            text: "Eres un asistente experto en visión computacional y catalogación de activos digitales para marketing de marcas. Responde siempre con un objeto JSON válido.",
+          },
+        ],
+      },
+      contents: [
         {
           role: "user",
-          content: [
-            { type: "text", text: buildVisionTaggingPrompt(params.branchName) },
+          parts: [
+            { text: buildVisionTaggingPrompt(params.branchName) },
             {
-              type: "image_url",
-              image_url: {
-                url: params.imageUrl,
-                detail: "low",
+              inlineData: {
+                mimeType: inlineData.mimeType,
+                data: inlineData.data,
               },
             },
           ],
         },
       ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.2,
+      },
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI Vision respondió con estado ${response.status}`);
+    throw await buildGeminiHttpError(response, "Gemini Vision");
   }
 
   const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: unknown } }>;
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: unknown }> };
+    }>;
   };
-  const content = payload.choices?.[0]?.message?.content;
+  const content = payload.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!content) {
-    throw new Error("OpenAI Vision devolvió una respuesta vacía.");
+    throw new Error("Gemini Vision devolvió una respuesta vacía.");
   }
 
   return parseAndValidateVisionTagsResponse(content);
 }
 
 /**
- * REQ-2.2: Orquestador de auto-etiquetado visual para activos subidos.
- * Prioriza OpenAI Vision (`gpt-4o-mini`), luego Webhook IA y finalmente fallback por nombre de archivo.
+ * REQ-2.2: Orquestador de auto-etiquetado visual para activos.
+ * Prioriza Google Gemini Vision (`gemini-2.5-flash`), luego Webhook IA.
+ * Cuando `allowFilenameFallback` es `true` (por defecto al subir un archivo nuevo),
+ * usa `inferTagsFromFilename` si la IA no está disponible para no abortar la subida a Supabase Storage;
+ * cuando es `false` (ej. botón "Sugerir con IA Vision"), exige que el proveedor IA responda.
  */
 export async function analyzeAssetImageTags(options: {
   imageUrl?: string | undefined;
@@ -200,11 +321,12 @@ export async function analyzeAssetImageTags(options: {
   apiKey?: string | undefined;
   webhookUrl?: string | undefined;
   model?: string | undefined;
+  allowFilenameFallback?: boolean | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<{ tags: string[]; source: VisionTagSource }> {
   const apiKey = (
     options.apiKey ??
-    (import.meta.env["VITE_OPENAI_API_KEY"] as string | undefined) ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
     ""
   ).trim();
   const webhookUrl = (
@@ -214,24 +336,40 @@ export async function analyzeAssetImageTags(options: {
   ).trim();
   const model = (
     options.model ??
-    (import.meta.env["VITE_OPENAI_MODEL"] as string | undefined) ??
-    OPENAI_DEFAULT_MODEL
+    (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined) ??
+    GEMINI_DEFAULT_MODEL
   ).trim();
+  const allowFallback = options.allowFilenameFallback ?? true;
   const fetchImpl = options.fetchFn ?? fetch;
   const imageUrl = options.imageUrl?.trim();
 
+  if (!apiKey && !webhookUrl) {
+    if (!allowFallback) {
+      throw new Error(
+        "No hay proveedor de visión configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+      );
+    }
+    return {
+      tags: inferTagsFromFilename(options.filename),
+      source: "filename_fallback",
+    };
+  }
+
   if (apiKey && imageUrl) {
     try {
-      const tags = await callOpenAIVisionForTags({
+      const tags = await callGeminiVisionForTags({
         imageUrl,
         apiKey,
         branchName: options.branchName,
         model,
         fetchFn: fetchImpl,
       });
-      return { tags, source: "openai" };
+      return { tags, source: "gemini" };
     } catch (err) {
-      console.warn("Fallo en auto-tagging con OpenAI Vision, aplicando fallback:", err);
+      if (!allowFallback && !webhookUrl) {
+        throw err;
+      }
+      console.warn("Fallo en auto-tagging con Gemini Vision:", err);
     }
   }
 
@@ -254,7 +392,10 @@ export async function analyzeAssetImageTags(options: {
       const tags = parseAndValidateVisionTagsResponse(raw);
       return { tags, source: "webhook" };
     } catch (err) {
-      console.warn("Fallo en auto-tagging por Webhook, aplicando fallback:", err);
+      if (!allowFallback) {
+        throw err;
+      }
+      console.warn("Fallo en auto-tagging por Webhook:", err);
     }
   }
 
@@ -323,6 +464,8 @@ export function parseAndValidateAIPostResponse(raw: unknown): AIPostResponse {
 /**
  * Riesgo 2 (Alucinación JSON): Ejecuta el generador y reintenta hasta `maxRetries` veces
  * adicionales (por defecto 2) si la validación del JSON falla.
+ * Si el proveedor lanza un error HTTP de cuota/autenticación (`AIProviderHttpError`),
+ * propaga el error de inmediato sin reintentar inútilmente.
  */
 export async function generateWithRetry(
   providerCall: (attempt: number) => Promise<unknown>,
@@ -334,6 +477,9 @@ export async function generateWithRetry(
       const raw = await providerCall(attempt);
       return parseAndValidateAIPostResponse(raw);
     } catch (err) {
+      if (err instanceof AIProviderHttpError) {
+        throw err;
+      }
       lastError = err instanceof Error ? err : new Error(String(err));
     }
   }
@@ -391,45 +537,8 @@ export function resolveInitialPostStatus(
 }
 
 /**
- * Generador contextual determinista para la sucursal activa, respetando tono y tags disponibles.
- */
-export function buildContextualDraft(
-  branch: Pick<Sucursal, "nombre" | "tono" | "reglas_negativas">,
-  assets: Asset[],
-  variantIndex = 0,
-): AIPostResponse {
-  const bestUnusedFirst = [...assets].sort((a, b) => a.uses - b.uses);
-  const candidateAsset = bestUnusedFirst[variantIndex % Math.max(bestUnusedFirst.length, 1)];
-  const candidateTags =
-    candidateAsset && candidateAsset.tags.length > 0
-      ? candidateAsset.tags.map(normalizeTag).filter(Boolean)
-      : ["producto", "ambiente", "cafe"];
-
-  const primaryTag = candidateTags[0] || "cafe";
-  const tone = (branch.tono || "Cercano").toLowerCase();
-
-  let copyText: string;
-  if (tone.includes("profesional")) {
-    copyText = `En ${branch.nombre} cuidamos cada detalle de nuestra selección de origen para ofrecerte una experiencia consistente en cada taza. Visítanos hoy y descubre nuestra propuesta. ☕✨ #${branch.nombre.replace(/\s+/g, "")} #CafeDeEspecialidad #${primaryTag}`;
-  } else if (tone.includes("divertido")) {
-    copyText = `Tu día pide a gritos una pausa en ${branch.nombre} ☕😄 Ven por tu taza favorita y recarga energía de la buena. ¡Te esperamos hoy! 👇 #${branch.nombre.replace(/\s+/g, "")} #PlanDeCafe #${primaryTag}`;
-  } else if (tone.includes("inspirador")) {
-    copyText = `Cada gran historia comienza alrededor de una buena taza en ${branch.nombre}. Regálate un momento para conectar con lo que te inspira. 🌱☕ #${branch.nombre.replace(/\s+/g, "")} #MomentosDeOrigen #${primaryTag}`;
-  } else {
-    copyText = `¡El aroma recién preparado ya se siente en ${branch.nombre}! ☕💛 Pasa hoy por tu mesa favorita y disfruta una taza preparada con dedicación. #${branch.nombre.replace(/\s+/g, "")} #CafeColombiano #${primaryTag}`;
-  }
-
-  return {
-    post_type: "FEED_SINGLE",
-    copy_text: copyText,
-    recommended_visual_tags: candidateTags.slice(0, 3),
-    call_to_action_used: true,
-  };
-}
-
-/**
- * REQ-3.1: Construye el prompt de usuario con las etiquetas disponibles en el banco
- * y la especificación estricta del contrato JSON.
+ * REQ-3.1: Construye el prompt de usuario agnóstico al tipo de industria con las etiquetas
+ * disponibles en el banco y la especificación estricta del contrato JSON.
  */
 export function buildPostGenerationUserPrompt(params: {
   branchName: string;
@@ -442,21 +551,22 @@ export function buildPostGenerationUserPrompt(params: {
   const tagsList =
     normalizedTags.length > 0
       ? normalizedTags.join(", ")
-      : "producto, ambiente, origen, cafe";
+      : "producto, servicio, ambiente, comunidad";
 
   return [
-    `Redacta una nueva publicación para redes sociales de la sucursal "${params.branchName}" (variante #${(params.variantIndex ?? 0) + 1}).`,
-    `Etiquetas visuales disponibles en la biblioteca de activos: [${tagsList}].`,
+    `Redacta una nueva publicación para redes sociales de la marca/sucursal "${params.branchName}" (variante #${(params.variantIndex ?? 0) + 1}).`,
+    `Etiquetas visuales disponibles actualmente en la biblioteca de activos: [${tagsList}].`,
+    "Adapta el mensaje a la identidad de la marca, su tono de comunicación y el contexto que sugieren sus etiquetas visuales disponibles, sin asumir un giro de negocio ajeno a sus datos.",
     "Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:",
-    '{ "post_type": "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY", "copy_text": "<texto persuasivo en español con emojis y hashtags>", "recommended_visual_tags": ["<etiqueta_1>", "<etiqueta_2>"], "call_to_action_used": true }',
-    "Elige en `recommended_visual_tags` de 1 a 3 etiquetas que existan o coincidan con las disponibles en la biblioteca y respeta estrictamente las reglas negativas del sistema.",
+    '{ "post_type": "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY", "copy_text": "<texto persuasivo en español con emojis y hashtags acordes a la marca>", "recommended_visual_tags": ["<etiqueta_1>", "<etiqueta_2>"], "call_to_action_used": true }',
+    "Elige en `recommended_visual_tags` de 1 a 3 etiquetas que coincidan con las disponibles en la biblioteca y respeta estrictamente las reglas negativas del sistema.",
   ].join(" ");
 }
 
 /**
- * REQ-3.1: Invoca OpenAI `gpt-4o-mini` para generar el JSON de la publicación.
+ * REQ-3.1: Invoca Google Gemini (`gemini-2.5-flash`) para generar el JSON de la publicación.
  */
-export async function callOpenAIForPost(params: {
+export async function callGeminiForPost(params: {
   systemPrompt: string;
   userPrompt: string;
   apiKey: string;
@@ -464,35 +574,43 @@ export async function callOpenAIForPost(params: {
   fetchFn?: typeof fetch | undefined;
 }): Promise<unknown> {
   const fetchImpl = params.fetchFn ?? fetch;
-  const model = params.model || OPENAI_DEFAULT_MODEL;
+  const model = params.model || GEMINI_DEFAULT_MODEL;
+  const endpoint = buildGeminiEndpoint(model, params.apiKey);
 
-  const response = await fetchImpl(OPENAI_CHAT_COMPLETIONS_URL, {
+  const response = await fetchImpl(endpoint, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey}`,
     },
     body: JSON.stringify({
-      model,
-      response_format: { type: "json_object" },
-      temperature: 0.7,
-      messages: [
-        { role: "system", content: params.systemPrompt },
-        { role: "user", content: params.userPrompt },
+      systemInstruction: {
+        parts: [{ text: params.systemPrompt }],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: params.userPrompt }],
+        },
       ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        temperature: 0.7,
+      },
     }),
   });
 
   if (!response.ok) {
-    throw new Error(`OpenAI API respondió con estado ${response.status}`);
+    throw await buildGeminiHttpError(response, "Gemini API");
   }
 
   const payload = (await response.json()) as {
-    choices?: Array<{ message?: { content?: unknown } }>;
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: unknown }> };
+    }>;
   };
-  const content = payload.choices?.[0]?.message?.content;
+  const content = payload.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!content) {
-    throw new Error("OpenAI API devolvió una respuesta vacía.");
+    throw new Error("Gemini API devolvió una respuesta vacía.");
   }
 
   return content;
@@ -507,10 +625,9 @@ export interface GeneratePostOptions {
 }
 
 /**
- * Orquestador híbrido del Motor IA (REQ-1.2 + REQ-3.1 + REQ-3.2 + Riesgo 2):
- * 1. Si existe `VITE_OPENAI_API_KEY`, invoca OpenAI (`gpt-4o-mini`) validando el contrato JSON con hasta 2 reintentos.
- * 2. Si existe `VITE_AI_WEBHOOK_URL`, invoca el webhook externo con el prompt de sistema.
- * 3. De lo contrario utiliza el generador contextual determinista validado con `generateWithRetry`.
+ * Orquestador del Motor IA (REQ-1.2 + REQ-3.1 + REQ-3.2 + Riesgo 2):
+ * Exige un proveedor IA real (`VITE_GEMINI_API_KEY` o `VITE_AI_WEBHOOK_URL`),
+ * valida el contrato JSON con hasta 2 reintentos y cruza el activo óptimo.
  */
 export async function generateSocialPostForBranch(
   branch: Pick<Sucursal, "id" | "nombre" | "tono" | "reglas_negativas">,
@@ -527,17 +644,9 @@ export async function generateSocialPostForBranch(
     throw new Error("Banco de Contenido Agotado: No hay activos disponibles en esta sucursal.");
   }
 
-  const systemPrompt = buildBrandSystemPrompt(branch, options?.pillars);
-  const availableTags = Array.from(new Set(assets.flatMap((a) => a.tags)));
-  const userPrompt = buildPostGenerationUserPrompt({
-    branchName: branch.nombre,
-    availableTags,
-    variantIndex,
-  });
-
   const apiKey = (
     options?.apiKey ??
-    (import.meta.env["VITE_OPENAI_API_KEY"] as string | undefined) ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
     ""
   ).trim();
   const webhookUrl = (
@@ -547,17 +656,30 @@ export async function generateSocialPostForBranch(
   ).trim();
   const model = (
     options?.model ??
-    (import.meta.env["VITE_OPENAI_MODEL"] as string | undefined) ??
-    OPENAI_DEFAULT_MODEL
+    (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined) ??
+    GEMINI_DEFAULT_MODEL
   ).trim();
   const fetchImpl = options?.fetchFn ?? fetch;
 
-  let provider: AIProviderSource = "local_fallback";
+  if (!apiKey && !webhookUrl) {
+    throw new Error(
+      "No hay un proveedor de IA configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+    );
+  }
+
+  const systemPrompt = buildBrandSystemPrompt(branch, options?.pillars);
+  const availableTags = Array.from(new Set(assets.flatMap((a) => a.tags)));
+  const userPrompt = buildPostGenerationUserPrompt({
+    branchName: branch.nombre,
+    availableTags,
+    variantIndex,
+  });
+
+  const provider: AIProviderSource = apiKey ? "gemini" : "webhook";
 
   const aiResponse = await generateWithRetry(async () => {
     if (apiKey) {
-      provider = "openai";
-      return callOpenAIForPost({
+      return callGeminiForPost({
         systemPrompt,
         userPrompt,
         apiKey,
@@ -566,26 +688,23 @@ export async function generateSocialPostForBranch(
       });
     }
 
-    if (webhookUrl) {
-      provider = "webhook";
-      const response = await fetchImpl(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sucursal_id: branch.id,
-          system_prompt: systemPrompt,
-          user_prompt: userPrompt,
-          available_tags: availableTags,
-        }),
-      });
-      if (!response.ok) {
-        throw new Error(`Webhook respondió con estado ${response.status}`);
-      }
-      return response.json();
+    const response = await fetchImpl(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sucursal_id: branch.id,
+        system_prompt: systemPrompt,
+        user_prompt: userPrompt,
+        available_tags: availableTags,
+      }),
+    });
+    if (!response.ok) {
+      throw new AIProviderHttpError(
+        `Webhook respondió con estado ${response.status}`,
+        response.status,
+      );
     }
-
-    provider = "local_fallback";
-    return buildContextualDraft(branch, assets, variantIndex);
+    return response.json();
   });
 
   const matchedAsset = selectBestMatchingAsset(assets, aiResponse.recommended_visual_tags);

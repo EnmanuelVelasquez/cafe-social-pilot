@@ -184,8 +184,8 @@ function Activos() {
       }
 
       toast.dismiss(loadingToast);
-      if (tagSource === "openai") {
-        toast.success("Imagen subida y etiquetada con OpenAI Vision (gpt-4o-mini)");
+      if (tagSource === "gemini") {
+        toast.success("Imagen subida y etiquetada con Gemini Vision (gemini-2.5-flash)");
       } else if (tagSource === "webhook") {
         toast.success("Imagen subida y etiquetada por Webhook IA");
       } else {
@@ -213,19 +213,22 @@ function Activos() {
         imageUrl: editingTags.img,
         filename: editingTags.name,
         branchName: sucursalActiva.nombre,
+        allowFilenameFallback: false,
       });
       const formatted = formatTagsString(detectedTags.join(", "));
       setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
-      if (source === "openai") {
-        toast.success("Etiquetas generadas con OpenAI Vision (gpt-4o-mini)");
-      } else if (source === "webhook") {
-        toast.success("Etiquetas generadas por Webhook IA");
+      if (source === "gemini") {
+        toast.success("Etiquetas generadas con Gemini Vision (gemini-2.5-flash)");
       } else {
-        toast("Etiquetas sugeridas localmente (configura VITE_OPENAI_API_KEY para visión real)");
+        toast.success("Etiquetas generadas por Webhook IA");
       }
     } catch (error: any) {
       console.error(error);
-      toast.error("No se pudo analizar la imagen con IA");
+      toast.error(
+        error?.message
+          ? `Error al analizar con IA: ${error.message}`
+          : "No se pudo analizar la imagen con IA",
+      );
     } finally {
       setIsAnalyzingVision(false);
     }

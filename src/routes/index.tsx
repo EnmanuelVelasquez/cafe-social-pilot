@@ -196,22 +196,21 @@ function Dashboard() {
 
     setIsGenerating(true);
     try {
-      const { aiResponse, matchedAsset, provider } = await generateSocialPostForBranch(
-        sucursalActiva,
-        branchAssets,
-        posts.length,
-      );
+      const { aiResponse, matchedAsset, provider } =
+        await generateSocialPostForBranch(
+          sucursalActiva,
+          branchAssets,
+          posts.length,
+        );
 
       const initialStatus = resolveInitialPostStatus(auto);
       const nextNetwork = posts.length % 2 === 0 ? "Instagram" : "Facebook";
       const scheduledDate = new Date(Date.now() + (posts.length + 1) * 3600 * 1000 * 6);
       const nextUses = matchedAsset.uses + 1;
       const providerBadge =
-        provider === "openai"
-          ? " con OpenAI (gpt-4o-mini)"
-          : provider === "webhook"
-            ? " vía Webhook IA"
-            : "";
+        provider === "gemini"
+          ? " con Gemini (gemini-2.5-flash)"
+          : " vía Webhook IA";
 
       if (!supabase) {
         const mockPost: PostData = {
