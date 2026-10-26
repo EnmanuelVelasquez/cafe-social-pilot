@@ -16,13 +16,14 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { analyzeAssetImageTags, fileToDataUrl } from "@/lib/ai-engine";
+import { analyzeAssetImageTags } from "@/lib/ai-engine";
 import {
   assets as sampleAssets,
   countUnused,
   extractStoragePath,
   formatTagsString,
   hasAffectedRows,
+  inferTagsFromFilename,
   isLowStock,
   parseTags,
   validateAssetFile,
@@ -139,7 +140,7 @@ function Activos() {
     }
 
     setIsUploading(true);
-    const loadingToast = toast.loading("Subiendo y analizando imagen con IA Vision...");
+    const loadingToast = toast.loading("Subiendo activo a la galería...");
 
     try {
       const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -155,14 +156,7 @@ function Activos() {
         data: { publicUrl },
       } = supabase.storage.from("galeria").getPublicUrl(fileName);
 
-      const visionInputUrl = await fileToDataUrl(file).catch(() => publicUrl);
-      const { tags: analyzedTags, source: tagSource } = await analyzeAssetImageTags({
-        imageUrl: visionInputUrl || publicUrl,
-        filename: file.name,
-        branchName: sucursalActiva.nombre,
-      });
-
-      const autoTags = formatTagsString(analyzedTags.join(", "));
+      const autoTags = formatTagsString(inferTagsFromFilename(file.name).join(", "));
 
       const { data: inserted, error: insertError } = await supabase
         .from("activos")
@@ -184,13 +178,7 @@ function Activos() {
       }
 
       toast.dismiss(loadingToast);
-      if (tagSource === "gemini") {
-        toast.success("Imagen subida y etiquetada con Gemini Vision (gemini-3.8-flash)");
-      } else if (tagSource === "webhook") {
-        toast.success("Imagen subida y etiquetada por Webhook IA");
-      } else {
-        toast.success("Imagen subida y etiquetada correctamente");
-      }
+      toast.success("Imagen subida correctamente (puedes usar IA Vision desde Editar etiquetas)");
     } catch (error: any) {
       console.error(error);
       toast.dismiss(loadingToast);

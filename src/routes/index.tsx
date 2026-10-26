@@ -18,6 +18,7 @@ import {
   Trash2,
   TriangleAlert,
   Plug,
+  Repeat,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
@@ -25,6 +26,8 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
@@ -40,12 +43,18 @@ import {
   resolveInitialPostStatus,
 } from "@/lib/ai-engine";
 import {
+  MAX_POST_COPY_LENGTH,
+  SUPPORTED_SOCIAL_NETWORKS,
   assets as sampleAssets,
+  formatScheduledDateLabel,
   hasAffectedRows,
   isZeroInventory,
   parseTags,
   posts as samplePosts,
+  toDatetimeLocalInputValue,
+  validatePostEditPayload,
   type Asset,
+  type SocialNetwork,
 } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
@@ -68,10 +77,20 @@ type PostData = {
   id: string;
   copy: string;
   when: string;
+  scheduledAtIso: string;
   network: string;
   status: string;
   img: string;
   pillar: string;
+  assetId: string;
+};
+
+type EditingPostState = {
+  id: string;
+  draft: string;
+  network: SocialNetwork;
+  scheduledAtLocal: string;
+  assetId: string;
 };
 
 function mapRowToAsset(d: any, index: number): Asset {
@@ -94,7 +113,7 @@ function Dashboard() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
-  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
+  const [editing, setEditing] = useState<EditingPostState | null>(null);
 
   useEffect(() => {
     if (!sucursalActiva) {
@@ -105,7 +124,18 @@ function Dashboard() {
 
     const fetchDashboardData = async () => {
       if (!supabase) {
-        setPosts(samplePosts.map((p) => ({ ...p, id: String(p.id) })));
+        setPosts(
+          samplePosts.map((p, idx) => {
+            const fallbackDate = new Date(Date.now() + (idx + 1) * 3600 * 1000 * 6).toISOString();
+            const matchedSampleAsset = sampleAssets.find((a) => a.img === p.img);
+            return {
+              ...p,
+              id: String(p.id),
+              scheduledAtIso: fallbackDate,
+              assetId: matchedSampleAsset ? String(matchedSampleAsset.id) : "",
+            };
+          }),
+        );
         setBranchAssets(sampleAssets);
         setHasActiveIntegration(true);
         return;
@@ -123,6 +153,7 @@ function Dashboard() {
               fecha_publicacion, 
               red_social, 
               estado, 
+              activo_id,
               activos (url_imagen, tags)
             `,
             )
@@ -155,18 +186,20 @@ function Dashboard() {
         }
 
         if (postsRes.data && !postsRes.error) {
-          const formattedPosts = postsRes.data.map((d: any) => ({
-            id: d.id,
-            copy: d.texto_copy,
-            when: new Date(d.fecha_publicacion).toLocaleString("es-CO", {
-              dateStyle: "short",
-              timeStyle: "short",
-            }),
-            network: d.red_social,
-            status: d.estado,
-            img: d.activos?.url_imagen || "",
-            pillar: d.activos?.tags || "General",
-          }));
+          const formattedPosts = postsRes.data.map((d: any) => {
+            const isoDate = d.fecha_publicacion || new Date().toISOString();
+            return {
+              id: d.id,
+              copy: d.texto_copy,
+              when: formatScheduledDateLabel(isoDate),
+              scheduledAtIso: isoDate,
+              network: d.red_social || "Instagram",
+              status: d.estado,
+              img: d.activos?.url_imagen || "",
+              pillar: d.activos?.tags || "General",
+              assetId: d.activo_id ? String(d.activo_id) : "",
+            };
+          });
           setPosts(formattedPosts);
         } else if (postsRes.error) {
           toast.error("Error cargando publicaciones");
@@ -206,6 +239,7 @@ function Dashboard() {
       const initialStatus = resolveInitialPostStatus(auto);
       const nextNetwork = posts.length % 2 === 0 ? "Instagram" : "Facebook";
       const scheduledDate = new Date(Date.now() + (posts.length + 1) * 3600 * 1000 * 6);
+      const scheduledIso = scheduledDate.toISOString();
       const nextUses = matchedAsset.uses + 1;
       const providerBadge =
         provider === "gemini"
@@ -216,14 +250,13 @@ function Dashboard() {
         const mockPost: PostData = {
           id: `post-${Date.now()}`,
           copy: aiResponse.copy_text,
-          when: scheduledDate.toLocaleString("es-CO", {
-            dateStyle: "short",
-            timeStyle: "short",
-          }),
+          when: formatScheduledDateLabel(scheduledIso),
+          scheduledAtIso: scheduledIso,
           network: nextNetwork,
           status: initialStatus,
           img: matchedAsset.img,
           pillar: matchedAsset.tags.join(", ") || "General",
+          assetId: String(matchedAsset.id),
         };
         setPosts((prev) => [mockPost, ...prev]);
         setBranchAssets((prev) =>
@@ -239,7 +272,7 @@ function Dashboard() {
           {
             sucursal_id: sucursalActiva.id,
             texto_copy: aiResponse.copy_text,
-            fecha_publicacion: scheduledDate.toISOString(),
+            fecha_publicacion: scheduledIso,
             red_social: nextNetwork,
             estado: initialStatus,
             activo_id: String(matchedAsset.id),
@@ -260,17 +293,17 @@ function Dashboard() {
       );
 
       if (inserted) {
+        const createdIso = inserted.fecha_publicacion || scheduledIso;
         const createdPost: PostData = {
           id: inserted.id,
           copy: inserted.texto_copy,
-          when: new Date(inserted.fecha_publicacion).toLocaleString("es-CO", {
-            dateStyle: "short",
-            timeStyle: "short",
-          }),
+          when: formatScheduledDateLabel(createdIso),
+          scheduledAtIso: createdIso,
           network: inserted.red_social,
           status: inserted.estado,
           img: matchedAsset.img,
           pillar: matchedAsset.tags.join(", ") || "General",
+          assetId: String(matchedAsset.id),
         };
         setPosts((prev) => [createdPost, ...prev]);
       }
@@ -392,36 +425,130 @@ function Dashboard() {
 
   const openEdit = (id: string) => {
     const post = posts.find((p) => p.id === id);
-    if (post) setEditing({ id, draft: post.copy });
+    if (!post) return;
+
+    const matchedByImg = branchAssets.find((a) => a.img === post.img);
+    const resolvedAssetId =
+      post.assetId || (matchedByImg ? String(matchedByImg.id) : String(branchAssets[0]?.id ?? ""));
+
+    setEditing({
+      id: post.id,
+      draft: post.copy,
+      network: post.network === "Facebook" ? "Facebook" : "Instagram",
+      scheduledAtLocal: toDatetimeLocalInputValue(post.scheduledAtIso),
+      assetId: resolvedAssetId,
+    });
   };
 
-  const saveCopy = async () => {
+  const savePostEdit = async () => {
     if (!editing) return;
-    const text = editing.draft.trim();
-    if (!text) {
-      toast.error("El texto no puede quedar vacío");
+
+    const validation = validatePostEditPayload({
+      copy: editing.draft,
+      network: editing.network,
+      scheduledAtLocal: editing.scheduledAtLocal,
+    });
+
+    if (
+      !validation.valid ||
+      !validation.normalizedCopy ||
+      !validation.network ||
+      !validation.scheduledIso
+    ) {
+      toast.error(validation.reason ?? "Datos de publicación inválidos");
       return;
     }
 
-    setPosts((ps) =>
-      ps.map((p) => (p.id === editing.id ? { ...p, copy: text, status: "programado" } : p)),
-    );
+    const currentPost = posts.find((p) => p.id === editing.id);
+    const selectedAsset = branchAssets.find((a) => String(a.id) === editing.assetId);
+    const nextImg = selectedAsset ? selectedAsset.img : (currentPost?.img ?? "");
+    const nextPillar = selectedAsset
+      ? selectedAsset.tags.join(", ") || "General"
+      : (currentPost?.pillar ?? "General");
+    const nextAssetId = selectedAsset ? String(selectedAsset.id) : (currentPost?.assetId ?? "");
+    const nextWhen = formatScheduledDateLabel(validation.scheduledIso);
+    const assetChanged =
+      Boolean(selectedAsset) && String(selectedAsset?.id) !== (currentPost?.assetId ?? "");
 
     if (!supabase) {
+      setPosts((ps) =>
+        ps.map((p) =>
+          p.id === editing.id
+            ? {
+                ...p,
+                copy: validation.normalizedCopy!,
+                network: validation.network!,
+                scheduledAtIso: validation.scheduledIso!,
+                when: nextWhen,
+                img: nextImg,
+                pillar: nextPillar,
+                assetId: nextAssetId,
+                status: "programado",
+              }
+            : p,
+        ),
+      );
+      if (assetChanged && selectedAsset) {
+        setBranchAssets((prev) =>
+          prev.map((a) => (a.id === selectedAsset.id ? { ...a, uses: a.uses + 1 } : a)),
+        );
+      }
       setEditing(null);
-      toast.success("Texto actualizado y programado");
+      toast.success("Publicación actualizada y programada");
       return;
     }
+
+    const updatePayload: Record<string, unknown> = {
+      texto_copy: validation.normalizedCopy,
+      red_social: validation.network,
+      fecha_publicacion: validation.scheduledIso,
+      estado: "programado",
+    };
+    if (nextAssetId) {
+      updatePayload["activo_id"] = nextAssetId;
+    }
+
     const { data, error } = await supabase
       .from("publicaciones")
-      .update({ texto_copy: text, estado: "programado" })
+      .update(updatePayload)
       .eq("id", editing.id)
       .select();
 
-    setEditing(null);
+    if (error || !hasAffectedRows(data)) {
+      toast.error("Error guardando los cambios de la publicación en Supabase");
+      return;
+    }
 
-    if (error || !hasAffectedRows(data)) toast.error("Error guardando el texto en Supabase");
-    else toast.success("Texto actualizado y programado");
+    if (assetChanged && selectedAsset) {
+      const nextUses = selectedAsset.uses + 1;
+      await supabase
+        .from("activos")
+        .update({ contador_uso: nextUses })
+        .eq("id", String(selectedAsset.id));
+      setBranchAssets((prev) =>
+        prev.map((a) => (a.id === selectedAsset.id ? { ...a, uses: nextUses } : a)),
+      );
+    }
+
+    setPosts((ps) =>
+      ps.map((p) =>
+        p.id === editing.id
+          ? {
+              ...p,
+              copy: validation.normalizedCopy!,
+              network: validation.network!,
+              scheduledAtIso: validation.scheduledIso!,
+              when: nextWhen,
+              img: nextImg,
+              pillar: nextPillar,
+              assetId: nextAssetId,
+              status: "programado",
+            }
+          : p,
+      ),
+    );
+    setEditing(null);
+    toast.success("Publicación actualizada y programada en Supabase");
   };
 
   const stats = [
@@ -611,15 +738,13 @@ function Dashboard() {
                 )}
               </Button>
               {p.status === "pendiente" && (
-                <>
-                  <Button variant="brand" onClick={() => approve(p.id)}>
-                    <CheckCircle2 /> Aprobar y Programar
-                  </Button>
-                  <Button variant="outline" onClick={() => openEdit(p.id)}>
-                    <Pencil /> Editar Copy
-                  </Button>
-                </>
+                <Button variant="brand" onClick={() => approve(p.id)}>
+                  <CheckCircle2 /> Aprobar y Programar
+                </Button>
               )}
+              <Button variant="outline" onClick={() => openEdit(p.id)}>
+                <Pencil /> {p.status === "pendiente" ? "Editar" : "Reprogramar"}
+              </Button>
             </div>
           </article>
         ))}
@@ -641,25 +766,123 @@ function Dashboard() {
       </div>
 
       <Dialog open={editing !== null} onOpenChange={(open) => !open && setEditing(null)}>
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-xl">
           <DialogHeader>
-            <DialogTitle>Editar Copy</DialogTitle>
-            <DialogDescription>Ajusta el texto antes de programar la publicación.</DialogDescription>
+            <DialogTitle>Editar y Programar Publicación</DialogTitle>
+            <DialogDescription>
+              Personaliza la red social, fecha y hora exacta, imagen asociada y texto del post.
+            </DialogDescription>
           </DialogHeader>
-          <Textarea
-            value={editing?.draft ?? ""}
-            onChange={(e) => setEditing((prev) => (prev ? { ...prev, draft: e.target.value } : prev))}
-            rows={6}
-            maxLength={2200}
-            placeholder="Escribe el texto de la publicación…"
-            autoFocus
-          />
-          <p className="text-right text-xs text-muted-foreground">{editing?.draft.length ?? 0}/2200</p>
+
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Red Social</Label>
+                <div className="grid grid-cols-2 gap-2">
+                  {SUPPORTED_SOCIAL_NETWORKS.map((net) => {
+                    const isSelected = editing?.network === net;
+                    return (
+                      <button
+                        key={net}
+                        type="button"
+                        onClick={() =>
+                          setEditing((prev) => (prev ? { ...prev, network: net } : prev))
+                        }
+                        className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium transition ${
+                          isSelected
+                            ? "border-primary bg-primary-soft text-primary"
+                            : "bg-card hover:bg-muted"
+                        }`}
+                      >
+                        {net === "Instagram" ? (
+                          <Instagram className="h-4 w-4 text-violet" />
+                        ) : (
+                          <Facebook className="h-4 w-4 text-primary" />
+                        )}
+                        {net}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="post-schedule-datetime">Fecha y Hora de Publicación</Label>
+                <Input
+                  id="post-schedule-datetime"
+                  type="datetime-local"
+                  value={editing?.scheduledAtLocal ?? ""}
+                  onChange={(e) =>
+                    setEditing((prev) =>
+                      prev ? { ...prev, scheduledAtLocal: e.target.value } : prev,
+                    )
+                  }
+                />
+              </div>
+            </div>
+
+            {branchAssets.length > 0 && (
+              <div className="space-y-2">
+                <Label>Activo Visual Asociado ({branchAssets.length} disponibles)</Label>
+                <div className="grid max-h-48 grid-cols-3 gap-2.5 overflow-y-auto rounded-xl border bg-muted/30 p-2.5 sm:grid-cols-4">
+                  {branchAssets.map((asset) => {
+                    const isSelected = editing?.assetId === String(asset.id);
+                    return (
+                      <button
+                        key={asset.id}
+                        type="button"
+                        onClick={() =>
+                          setEditing((prev) =>
+                            prev ? { ...prev, assetId: String(asset.id) } : prev,
+                          )
+                        }
+                        className={`group relative overflow-hidden rounded-xl border text-left transition ${
+                          isSelected
+                            ? "border-primary bg-primary-soft ring-2 ring-primary/30"
+                            : "bg-card hover:border-primary/50"
+                        }`}
+                      >
+                        <img
+                          src={asset.img}
+                          alt={asset.name}
+                          className="aspect-square w-full object-cover"
+                        />
+                        <div className="p-1.5">
+                          <p className="truncate text-[11px] font-semibold">{asset.name}</p>
+                          <p className="inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                            <Repeat className="h-2.5 w-2.5" /> Usos: {asset.uses}
+                          </p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="post-copy-textarea">Texto del Copy</Label>
+              <Textarea
+                id="post-copy-textarea"
+                value={editing?.draft ?? ""}
+                onChange={(e) =>
+                  setEditing((prev) => (prev ? { ...prev, draft: e.target.value } : prev))
+                }
+                rows={5}
+                maxLength={MAX_POST_COPY_LENGTH}
+                placeholder="Escribe el texto de la publicación…"
+              />
+              <p className="text-right text-xs text-muted-foreground">
+                {editing?.draft.length ?? 0}/{MAX_POST_COPY_LENGTH}
+              </p>
+            </div>
+          </div>
+
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditing(null)}>
               Cancelar
             </Button>
-            <Button variant="brand" onClick={saveCopy}>
+            <Button variant="brand" onClick={savePostEdit}>
               <CheckCircle2 /> Guardar y Programar
             </Button>
           </DialogFooter>

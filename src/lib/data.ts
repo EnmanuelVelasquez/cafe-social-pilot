@@ -156,3 +156,119 @@ export function inferTagsFromFilename(filename: string): string[] {
 export function hasAffectedRows(rows: unknown[] | null | undefined): boolean {
   return Array.isArray(rows) && rows.length > 0;
 }
+
+export const SUPPORTED_SOCIAL_NETWORKS = ["Instagram", "Facebook"] as const;
+export type SocialNetwork = (typeof SUPPORTED_SOCIAL_NETWORKS)[number];
+
+/** Límite máximo de caracteres permitido para el copy de una publicación en Meta. */
+export const MAX_POST_COPY_LENGTH = 2200;
+
+/**
+ * Convierte una fecha ISO o instancia `Date` al formato `YYYY-MM-DDTHH:mm`
+ * requerido por `<input type="datetime-local" />` en la zona horaria local.
+ */
+export function toDatetimeLocalInputValue(
+  isoOrDate: string | Date | null | undefined,
+  fallbackNow: Date = new Date(),
+): string {
+  let d: Date;
+  if (isoOrDate instanceof Date) {
+    d = isoOrDate;
+  } else if (typeof isoOrDate === "string" && isoOrDate.trim()) {
+    const parsed = new Date(isoOrDate);
+    d = Number.isNaN(parsed.getTime()) ? fallbackNow : parsed;
+  } else {
+    d = fallbackNow;
+  }
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+/**
+ * Parsea y valida un valor de `<input type="datetime-local" />` devolviendo su representación ISO 8601
+ * para guardar en `publicaciones.fecha_publicacion`, o `null` si la fecha es inválida.
+ */
+export function parseDatetimeLocalToIso(datetimeLocalValue: string): string | null {
+  const cleaned = datetimeLocalValue.trim();
+  if (!cleaned) return null;
+  const parsed = new Date(cleaned);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+/**
+ * Formatea una fecha ISO en etiqueta legible (`es-CO`) para mostrar en la tarjeta de publicación.
+ */
+export function formatScheduledDateLabel(isoDate: string): string {
+  const parsed = new Date(isoDate);
+  if (Number.isNaN(parsed.getTime())) return isoDate;
+  return parsed.toLocaleString("es-CO", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+export interface PostEditValidationResult {
+  valid: boolean;
+  reason?: string | undefined;
+  normalizedCopy?: string | undefined;
+  network?: SocialNetwork | undefined;
+  scheduledIso?: string | undefined;
+}
+
+/**
+ * Fase B: Valida los campos editados de una publicación (copy, red social y fecha/hora programada)
+ * antes de persistirlos en la tabla `publicaciones` de Supabase.
+ */
+export function validatePostEditPayload(input: {
+  copy: string;
+  network: string;
+  scheduledAtLocal: string;
+}): PostEditValidationResult {
+  const normalizedCopy = input.copy.trim();
+  if (!normalizedCopy) {
+    return {
+      valid: false,
+      reason: "El texto de la publicación no puede quedar vacío.",
+    };
+  }
+
+  if (normalizedCopy.length > MAX_POST_COPY_LENGTH) {
+    return {
+      valid: false,
+      reason: `El texto supera el máximo de ${MAX_POST_COPY_LENGTH} caracteres permitido.`,
+    };
+  }
+
+  if (
+    !SUPPORTED_SOCIAL_NETWORKS.includes(
+      input.network as (typeof SUPPORTED_SOCIAL_NETWORKS)[number],
+    )
+  ) {
+    return {
+      valid: false,
+      reason: "Selecciona una red social válida (Instagram o Facebook).",
+    };
+  }
+
+  const scheduledIso = parseDatetimeLocalToIso(input.scheduledAtLocal);
+  if (!scheduledIso) {
+    return {
+      valid: false,
+      reason: "Selecciona una fecha y hora de publicación válida.",
+    };
+  }
+
+  return {
+    valid: true,
+    normalizedCopy,
+    network: input.network as SocialNetwork,
+    scheduledIso,
+  };
+}

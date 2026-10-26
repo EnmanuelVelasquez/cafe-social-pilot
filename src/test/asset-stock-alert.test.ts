@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   LOW_STOCK_THRESHOLD,
   MAX_ASSET_SIZE_BYTES,
+  MAX_POST_COPY_LENGTH,
   assets,
   countUnused,
   extractStoragePath,
@@ -11,8 +12,11 @@ import {
   inferTagsFromFilename,
   isLowStock,
   isZeroInventory,
+  parseDatetimeLocalToIso,
   parseTags,
+  toDatetimeLocalInputValue,
   validateAssetFile,
+  validatePostEditPayload,
   type Asset,
 } from "@/lib/data";
 
@@ -93,5 +97,65 @@ describe("Validación de archivos de activos (REQ-2.1) y utilidades de Storage/T
     expect(hasAffectedRows([])).toBe(false);
     expect(hasAffectedRows(null)).toBe(false);
     expect(hasAffectedRows([{ id: "abc" }])).toBe(true);
+  });
+});
+
+describe("Edición y Reprogramación de Publicaciones en el Dashboard (Fase B)", () => {
+  it("convierte fechas entre ISO y formato datetime-local de forma consistente", () => {
+    const sampleDate = new Date(2026, 9, 28, 15, 30, 0);
+    const localInput = toDatetimeLocalInputValue(sampleDate);
+    expect(localInput).toBe("2026-10-28T15:30");
+
+    const parsedIso = parseDatetimeLocalToIso(localInput);
+    expect(parsedIso).toBe(sampleDate.toISOString());
+    expect(parseDatetimeLocalToIso("")).toBeNull();
+    expect(parseDatetimeLocalToIso("fecha-invalida")).toBeNull();
+  });
+
+  it("valida correctamente el payload de edición (copy, red social y fecha programada)", () => {
+    const valid = validatePostEditPayload({
+      copy: "  Nuevo copy programado para la semana 🚀  ",
+      network: "Facebook",
+      scheduledAtLocal: "2026-10-30T10:00",
+    });
+
+    expect(valid.valid).toBe(true);
+    expect(valid.normalizedCopy).toBe("Nuevo copy programado para la semana 🚀");
+    expect(valid.network).toBe("Facebook");
+    expect(valid.scheduledIso).toBe(new Date("2026-10-30T10:00").toISOString());
+  });
+
+  it("rechaza copy vacío, exceso de caracteres, red social inválida o fecha inválida", () => {
+    expect(
+      validatePostEditPayload({
+        copy: "   ",
+        network: "Instagram",
+        scheduledAtLocal: "2026-10-30T10:00",
+      }).valid,
+    ).toBe(false);
+
+    expect(
+      validatePostEditPayload({
+        copy: "a".repeat(MAX_POST_COPY_LENGTH + 1),
+        network: "Instagram",
+        scheduledAtLocal: "2026-10-30T10:00",
+      }).valid,
+    ).toBe(false);
+
+    expect(
+      validatePostEditPayload({
+        copy: "Copy válido",
+        network: "TikTok",
+        scheduledAtLocal: "2026-10-30T10:00",
+      }).valid,
+    ).toBe(false);
+
+    expect(
+      validatePostEditPayload({
+        copy: "Copy válido",
+        network: "Instagram",
+        scheduledAtLocal: "",
+      }).valid,
+    ).toBe(false);
   });
 });
