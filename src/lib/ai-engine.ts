@@ -88,6 +88,7 @@ export const VISION_TAGS_RESPONSE_SCHEMA = {
 interface GeminiCandidatePart {
   text?: unknown;
   thought?: boolean | undefined;
+  inlineData?: { mimeType?: unknown; data?: unknown } | undefined;
 }
 
 /**
@@ -810,4 +811,521 @@ export async function generateSocialPostForBranch(
   }
 
   return { aiResponse, matchedAsset, systemPrompt, provider };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Generador Semanal de Imágenes con IA (Google Gemini / Imagen API)
+ *
+ * Regla de negocio: el lote semanal se reparte siempre con la mezcla de
+ * pilares 40% Venta / 30% Educativo / 30% Estilo de vida, salvo que la marca
+ * configure otra distribución. Todo el texto que se envía al modelo se
+ * construye desde la sucursal activa, nunca con supuestos de giro de negocio.
+ * ------------------------------------------------------------------------- */
+
+export type WeeklyContentPillar = "VENTA" | "EDUCATIVO" | "ESTILO_DE_VIDA";
+export type WeeklyImageAspectRatio = "1:1" | "4:5" | "9:16";
+
+export const WEEKLY_CONTENT_PILLARS: readonly WeeklyContentPillar[] = [
+  "VENTA",
+  "EDUCATIVO",
+  "ESTILO_DE_VIDA",
+];
+
+/** Regla de pilares del pack semanal: 40% Venta, 30% Educativo, 30% Estilo de vida. */
+export const WEEKLY_PILLAR_SHARES: Record<WeeklyContentPillar, number> = {
+  VENTA: 40,
+  EDUCATIVO: 30,
+  ESTILO_DE_VIDA: 30,
+};
+
+export const WEEKLY_PILLAR_LABELS: Record<WeeklyContentPillar, string> = {
+  VENTA: "Venta / Producto",
+  EDUCATIVO: "Educativo",
+  ESTILO_DE_VIDA: "Estilo de vida / Comunidad",
+};
+
+export const WEEKLY_PILLAR_HASHTAGS: Record<WeeklyContentPillar, string> = {
+  VENTA: "#venta",
+  EDUCATIVO: "#educativo",
+  ESTILO_DE_VIDA: "#estilo_de_vida",
+};
+
+/** Proporciones de imagen compatibles con Meta Graph API (REQ-2.1). */
+export const WEEKLY_IMAGE_ASPECT_RATIOS: readonly WeeklyImageAspectRatio[] = [
+  "1:1",
+  "4:5",
+  "9:16",
+];
+
+export const WEEKLY_IMAGE_ASPECT_RATIO_LABELS: Record<WeeklyImageAspectRatio, string> = {
+  "1:1": "Feed cuadrado (1:1)",
+  "4:5": "Feed vertical (4:5)",
+  "9:16": "Stories / Reels (9:16)",
+};
+
+export const DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO: WeeklyImageAspectRatio = "4:5";
+export const MIN_WEEKLY_IMAGE_COUNT = 1;
+export const MAX_WEEKLY_IMAGE_COUNT = 5;
+export const DEFAULT_WEEKLY_IMAGE_COUNT = 3;
+
+export const GEMINI_DEFAULT_IMAGE_MODEL = "gemini-nano-banana-2.1";
+
+/** Etiqueta aplicada a todo activo creado por el generador semanal. */
+export const AI_GENERATED_TAG = "#ia_generada";
+
+const RETIRED_GEMINI_IMAGE_MODELS = new Set([
+  "imagen-3.0-generate-001",
+  // Identificador de marcador usado antes de conectar la API real de imágenes.
+  "gemini-3.8-flash-image",
+]);
+
+/** Resoluciones de salida admitidas por los modelos Nano Banana (uppercase K obligatorio). */
+export const SUPPORTED_GEMINI_IMAGE_SIZES = ["512", "1K", "2K", "4K"] as const;
+export type GeminiImageSize = (typeof SUPPORTED_GEMINI_IMAGE_SIZES)[number];
+
+/**
+ * Normaliza la resolución de salida opcional (`512`, `1K`, `2K`, `4K`).
+ * Si no se configura, no se envía `imageSize` y el modelo usa su valor por defecto.
+ */
+export function resolveGeminiImageSize(
+  raw?: string | undefined,
+): GeminiImageSize | undefined {
+  const cleaned = (raw ?? "").trim().toUpperCase().replace(/PX$/, "");
+  if (cleaned === "0.5K") return "512";
+  const found = SUPPORTED_GEMINI_IMAGE_SIZES.find((size) => size === cleaned);
+  return found;
+}
+
+/**
+ * Normaliza el modelo de generación de imágenes. Si la variable no está definida
+ * usa `GEMINI_DEFAULT_IMAGE_MODEL`; los modelos `imagen-*` se invocan con `:predict`.
+ */
+export function resolveGeminiImageModel(rawModel?: string | undefined): string {
+  const cleaned = (rawModel ?? "").trim().replace(/^models\//i, "");
+  if (!cleaned || RETIRED_GEMINI_IMAGE_MODELS.has(cleaned.toLowerCase())) {
+    return GEMINI_DEFAULT_IMAGE_MODEL;
+  }
+  return cleaned;
+}
+
+/** Los modelos Imagen usan el endpoint `:predict`; los Gemini usan `:generateContent`. */
+export function isImagenPredictModel(model: string): boolean {
+  return /^imagen/i.test(resolveGeminiImageModel(model));
+}
+
+export function buildGeminiImageEndpoint(model: string, apiKey: string): string {
+  const safeModel = encodeURIComponent(resolveGeminiImageModel(model));
+  const safeKey = encodeURIComponent(apiKey);
+  const method = isImagenPredictModel(model) ? "predict" : "generateContent";
+  return `${GEMINI_API_BASE_URL}/${safeModel}:${method}?key=${safeKey}`;
+}
+
+/**
+ * Acota la cantidad de imágenes del lote al rango soportado (1 a 5).
+ * Un valor inválido cae en `DEFAULT_WEEKLY_IMAGE_COUNT`.
+ */
+export function normalizeWeeklyImageCount(rawCount?: number | undefined): number {
+  if (typeof rawCount !== "number" || !Number.isFinite(rawCount)) {
+    return DEFAULT_WEEKLY_IMAGE_COUNT;
+  }
+  return Math.min(MAX_WEEKLY_IMAGE_COUNT, Math.max(MIN_WEEKLY_IMAGE_COUNT, Math.round(rawCount)));
+}
+
+/** Garantiza una relación de aspecto aceptada por la API (1:1, 4:5 o 9:16). */
+export function resolveWeeklyImageAspectRatio(
+  raw?: string | undefined,
+): WeeklyImageAspectRatio {
+  const cleaned = (raw ?? "").trim();
+  const found = WEEKLY_IMAGE_ASPECT_RATIOS.find((ratio) => ratio === cleaned);
+  return found ?? DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO;
+}
+
+export interface WeeklyBatchPlanItem {
+  index: number;
+  pillar: WeeklyContentPillar;
+  label: string;
+  hashtag: string;
+  sharePercent: number;
+  aspectRatio: WeeklyImageAspectRatio;
+}
+
+/**
+ * Planifica el lote semanal repartiendo `count` imágenes entre los pilares según
+ * sus porcentajes (por defecto 40/30/30). Usa el método del mayor residuo para
+ * no perder ni duplicar piezas y alterna los pilares para no agrupar el mismo
+ * tema en días consecutivos.
+ */
+export function calculateWeeklyBatchPlan(params: {
+  count: number;
+  shares?: Partial<Record<WeeklyContentPillar, number>> | undefined;
+  aspectRatio?: string | undefined;
+}): WeeklyBatchPlanItem[] {
+  const total = normalizeWeeklyImageCount(params.count);
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+
+  const weights = WEEKLY_CONTENT_PILLARS.map((pillar) => {
+    const raw = params.shares?.[pillar];
+    const value =
+      typeof raw === "number" && Number.isFinite(raw)
+        ? Math.max(0, raw)
+        : WEEKLY_PILLAR_SHARES[pillar];
+    return { pillar, value };
+  });
+
+  let weightTotal = weights.reduce((acc, w) => acc + w.value, 0);
+  if (weightTotal <= 0) {
+    for (const weight of weights) weight.value = 1;
+    weightTotal = weights.length;
+  }
+
+  const exactCounts = weights.map((w) => (w.value / weightTotal) * total);
+  const counts = exactCounts.map((value) => Math.floor(value));
+  let pending = total - counts.reduce((a, b) => a + b, 0);
+
+  const byRemainder = exactCounts
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+
+  for (const { index } of byRemainder) {
+    if (pending <= 0) break;
+    counts[index] = (counts[index] ?? 0) + 1;
+    pending -= 1;
+  }
+
+  const remainingByPillar = new Map<WeeklyContentPillar, number>();
+  WEEKLY_CONTENT_PILLARS.forEach((pillar, index) => {
+    remainingByPillar.set(pillar, counts[index] ?? 0);
+  });
+
+  const plan: WeeklyBatchPlanItem[] = [];
+  for (let index = 0; index < total; index++) {
+    let chosen: WeeklyContentPillar | null = null;
+    let bestRemaining = 0;
+    for (const pillar of WEEKLY_CONTENT_PILLARS) {
+      const left = remainingByPillar.get(pillar) ?? 0;
+      if (left > bestRemaining) {
+        bestRemaining = left;
+        chosen = pillar;
+      }
+    }
+    if (!chosen) break;
+
+    remainingByPillar.set(chosen, bestRemaining - 1);
+    const weight = weights.find((w) => w.pillar === chosen)?.value ?? 0;
+
+    plan.push({
+      index,
+      pillar: chosen,
+      label: WEEKLY_PILLAR_LABELS[chosen],
+      hashtag: WEEKLY_PILLAR_HASHTAGS[chosen],
+      sharePercent: Math.round((weight / weightTotal) * 1000) / 10,
+      aspectRatio,
+    });
+  }
+
+  return plan;
+}
+
+const TONE_VISUAL_GUIDES: ReadonlyArray<{ pattern: RegExp; guide: string }> = [
+  {
+    pattern: /cercan|amable|c[áa]lid|humano|emp[áa]tic/i,
+    guide:
+      "luz natural cálida, personas reales con expresiones espontáneas, planos cercanos y una atmósfera acogedora",
+  },
+  {
+    pattern: /profesional|corporativ|formal|institucional/i,
+    guide:
+      "composición limpia y minimalista, iluminación de estudio suave, profundidad de campo controlada y paleta sobria",
+  },
+  {
+    pattern: /divertid|alegre|juvenil|energ[ée]tic/i,
+    guide:
+      "colores vivos, movimiento y energía, ángulos dinámicos y situaciones alegres y desenfadadas",
+  },
+  {
+    pattern: /inspirador|aspiracional|premium|elegante|lujo/i,
+    guide:
+      "estética editorial aspiracional, luz cinematográfica, texturas ricas y acabado premium",
+  },
+  {
+    pattern: /modern|vanguard|tecno|minimal/i,
+    guide:
+      "geometrías limpias, alto contraste, sombras nítidas y estética contemporánea de editorial",
+  },
+];
+
+const DEFAULT_TONE_VISUAL_GUIDE =
+  "fotografía comercial luminosa, composición equilibrada, colores fieles a la marca y acabado profesional";
+
+/** Traduce el tono de voz de la marca en una guía de estilo fotográfico. */
+export function describeToneVisualStyle(tone?: string | undefined): string {
+  const cleaned = (tone ?? "").trim();
+  if (!cleaned) return DEFAULT_TONE_VISUAL_GUIDE;
+  const match = TONE_VISUAL_GUIDES.find((entry) => entry.pattern.test(cleaned));
+  return match?.guide ?? DEFAULT_TONE_VISUAL_GUIDE;
+}
+
+/** Objetivo narrativo de cada pilar de contenido, sin asumir un giro de negocio. */
+export function describeWeeklyPillarObjective(pillar: WeeklyContentPillar): string {
+  switch (pillar) {
+    case "VENTA":
+      return "objetivo comercial: el producto o servicio es el protagonista absoluto, mostrado en primer plano con detalle de textura, calidad y acabado";
+    case "EDUCATIVO":
+      return "objetivo educativo: ilustra un proceso, un detrás de cámaras o un detalle técnico que enseñe algo útil a la audiencia";
+    case "ESTILO_DE_VIDA":
+      return "objetivo de comunidad: escena de uso real donde personas disfrutan la experiencia de la marca en su día a día";
+    default:
+      return "objetivo de marca: escena versátil que represente la propuesta de valor del negocio";
+  }
+}
+
+export interface WeeklyImagePromptParams {
+  branchName: string;
+  pillar: WeeklyContentPillar;
+  tone?: string | undefined;
+  negativeRules?: string | undefined;
+  theme?: string | undefined;
+  aspectRatio?: string | undefined;
+  variantIndex?: number | undefined;
+}
+
+/**
+ * Construye el prompt visual profesional de una pieza del lote semanal.
+ * Inyecta identidad de marca, pilar, estilo según el tono, contexto de campaña
+ * y las reglas negativas como exclusión estricta. Nunca menciona un giro de
+ * negocio específico que la sucursal no haya declarado.
+ */
+export function buildWeeklyImagePrompt(params: WeeklyImagePromptParams): string {
+  const branchName = params.branchName.trim() || "la marca";
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+  const tone = params.tone?.trim() || "Cercano";
+  const theme = params.theme?.trim();
+  const negativeRules = params.negativeRules?.trim();
+  const variant = Math.max(0, Math.round(params.variantIndex ?? 0)) + 1;
+
+  return [
+    `Fotografía publicitaria profesional para redes sociales de "${branchName}" en formato ${aspectRatio} (relación de aspecto compatible con Meta).`,
+    `Pilar de contenido: ${WEEKLY_PILLAR_LABELS[params.pillar]}. ${describeWeeklyPillarObjective(params.pillar)}.`,
+    `Estilo visual obligatorio según el tono de marca "${tone}": ${describeToneVisualStyle(tone)}.`,
+    theme
+      ? `Contexto o campaña de la semana: ${theme}.`
+      : "Contexto de la semana: escena cotidiana y versátil que represente la propuesta de valor de la marca.",
+    `Variante visual #${variant}: cambia encuadre, ángulo o momento de la escena frente a las demás piezas del lote manteniendo la coherencia de marca.`,
+    "Identidad de marca: respeta una paleta cromática coherente y un ambiente auténtico; no inventes logotipos ni textos legibles dentro de la imagen.",
+    negativeRules
+      ? `Reglas negativas de la marca (excluir por completo de la imagen): [${negativeRules}].`
+      : "",
+    "Calidad: alta resolución, foco nítido, iluminación profesional, sin texto deformado, sin letras ilegibles, sin marcas de agua ni firmas.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+/** Etiquetas automáticas de un activo generado por IA: marca + pilar de contenido. */
+export function buildGeneratedAssetTags(pillar: WeeklyContentPillar): string[] {
+  return [AI_GENERATED_TAG, WEEKLY_PILLAR_HASHTAGS[pillar]];
+}
+
+export interface WeeklyBatchSummaryItem {
+  pillar: WeeklyContentPillar;
+  label: string;
+  sharePercent: number;
+  count: number;
+}
+
+/**
+ * Resumen deduplicado del lote para la UI: cuántas piezas aporta cada pilar y
+ * con qué peso dentro del total (sin repetir la misma fila por cada imagen).
+ */
+export function summarizeWeeklyBatchPlan(
+  plan: WeeklyBatchPlanItem[],
+): WeeklyBatchSummaryItem[] {
+  const byPillar = new Map<WeeklyContentPillar, WeeklyBatchSummaryItem>();
+  for (const item of plan) {
+    const current = byPillar.get(item.pillar);
+    if (current) {
+      current.count += 1;
+    } else {
+      byPillar.set(item.pillar, {
+        pillar: item.pillar,
+        label: item.label,
+        sharePercent: item.sharePercent,
+        count: 1,
+      });
+    }
+  }
+  return Array.from(byPillar.values());
+}
+
+interface GeminiInlineImage {
+  mimeType: string;
+  base64: string;
+}
+
+function readInlineImagePart(part: unknown): GeminiInlineImage | null {
+  if (!part || typeof part !== "object") return null;
+  const inline = (part as { inlineData?: unknown }).inlineData;
+  if (!inline || typeof inline !== "object") return null;
+  const data = (inline as { data?: unknown }).data;
+  if (typeof data !== "string" || data.trim().length === 0) return null;
+  const mimeType = (inline as { mimeType?: unknown }).mimeType;
+  return {
+    mimeType: typeof mimeType === "string" && mimeType.trim() ? mimeType.trim() : "image/png",
+    base64: data.trim(),
+  };
+}
+
+/**
+ * Extrae la imagen generada de cualquiera de los dos contratos de la API:
+ * `predictions[].bytesBase64Encoded` (Imagen) o `parts[].inlineData` (Gemini).
+ */
+export function extractInlineImageFromGeminiPayload(payload: unknown): GeminiInlineImage | null {
+  if (!payload || typeof payload !== "object") return null;
+  const obj = payload as Record<string, unknown>;
+
+  const predictions = obj["predictions"];
+  if (Array.isArray(predictions)) {
+    for (const prediction of predictions) {
+      if (!prediction || typeof prediction !== "object") continue;
+      const record = prediction as Record<string, unknown>;
+      const data = record["bytesBase64Encoded"];
+      if (typeof data === "string" && data.trim().length > 0) {
+        const mimeType = record["mimeType"];
+        return {
+          mimeType:
+            typeof mimeType === "string" && mimeType.trim() ? mimeType.trim() : "image/png",
+          base64: data.trim(),
+        };
+      }
+    }
+  }
+
+  const candidates = obj["candidates"];
+  if (Array.isArray(candidates)) {
+    for (const candidate of candidates) {
+      if (!candidate || typeof candidate !== "object") continue;
+      const parts = (candidate as { content?: { parts?: unknown } }).content?.parts;
+      if (!Array.isArray(parts)) continue;
+      for (const part of parts) {
+        const image = readInlineImagePart(part);
+        if (image) return image;
+      }
+    }
+  }
+
+  return null;
+}
+
+export interface GenerateImageParams {
+  prompt: string;
+  pillar: WeeklyContentPillar;
+  apiKey?: string | undefined;
+  aspectRatio?: string | undefined;
+  /** `512`, `1K`, `2K` o `4K`. Si se omite, se toma `VITE_GEMINI_IMAGE_SIZE`. */
+  imageSize?: string | undefined;
+  model?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}
+
+export interface GeneratedImage {
+  provider: "gemini";
+  model: string;
+  prompt: string;
+  pillar: WeeklyContentPillar;
+  aspectRatio: WeeklyImageAspectRatio;
+  mimeType: string;
+  base64: string;
+  dataUrl: string;
+  tags: string[];
+}
+
+/**
+ * Genera una imagen con Google Gemini / Imagen API y la devuelve lista para
+ * previsualizar (`dataUrl`) o subir a Supabase Storage (`base64` + `mimeType`).
+ * Soporta `imagen-*` (`:predict`) y modelos Gemini multimodales (`:generateContent`).
+ */
+export async function generateImageWithGemini(
+  params: GenerateImageParams,
+): Promise<GeneratedImage> {
+  const apiKey = (
+    params.apiKey ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
+    ""
+  ).trim();
+  if (!apiKey) {
+    throw new Error(
+      "No hay API Key de Gemini configurada para generar imágenes. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+    );
+  }
+
+  const prompt = params.prompt.trim();
+  if (!prompt) {
+    throw new Error("El prompt visual no puede estar vacío.");
+  }
+
+  const fetchImpl = params.fetchFn ?? fetch;
+  const model = resolveGeminiImageModel(
+    params.model ?? (import.meta.env["VITE_GEMINI_IMAGE_MODEL"] as string | undefined),
+  );
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+  const imageSize = resolveGeminiImageSize(
+    params.imageSize ?? (import.meta.env["VITE_GEMINI_IMAGE_SIZE"] as string | undefined),
+  );
+  const usesPredict = isImagenPredictModel(model);
+
+  const body = usesPredict
+    ? {
+        instances: [{ prompt }],
+        parameters: {
+          sampleCount: 1,
+          aspectRatio,
+        },
+      }
+    : {
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: prompt }],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["TEXT", "IMAGE"],
+          imageConfig: {
+            aspectRatio,
+            ...(imageSize ? { imageSize } : {}),
+          },
+        },
+      };
+
+  const response = await fetchImpl(buildGeminiImageEndpoint(model, apiKey), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    throw await buildGeminiHttpError(response, "Gemini Image");
+  }
+
+  const payload: unknown = await response.json();
+  const inlineImage = extractInlineImageFromGeminiPayload(payload);
+  if (!inlineImage) {
+    throw new Error(
+      "Gemini Image no devolvió ninguna imagen. Verifica que el modelo configurado en VITE_GEMINI_IMAGE_MODEL soporte generación de imágenes.",
+    );
+  }
+
+  return {
+    provider: "gemini",
+    model,
+    prompt,
+    pillar: params.pillar,
+    aspectRatio,
+    mimeType: inlineImage.mimeType,
+    base64: inlineImage.base64,
+    dataUrl: `data:${inlineImage.mimeType};base64,${inlineImage.base64}`,
+    tags: buildGeneratedAssetTags(params.pillar),
+  };
 }

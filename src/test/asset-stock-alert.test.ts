@@ -6,8 +6,10 @@ import {
   MAX_POST_COPY_LENGTH,
   MIN_ASSET_DIMENSION_PX,
   assets,
+  buildGeneratedAssetStoragePath,
   countPublishedThisMonth,
   countUnused,
+  dataUrlToBlob,
   extractStoragePath,
   formatTagsString,
   hasAffectedRows,
@@ -16,6 +18,7 @@ import {
   isZeroInventory,
   parseDatetimeLocalToIso,
   parseTags,
+  resolveImageExtension,
   toDatetimeLocalInputValue,
   validateAssetFile,
   validateImageDimensions,
@@ -236,5 +239,42 @@ describe("Validación de dimensiones y relación de aspecto para Meta Graph API 
     // Proporción 2:3 (ratio 0.6667, fuera tanto de Stories 9:16 como de Feed 4:5)
     const twoByThree = validateImageDimensions(1000, 1500);
     expect(twoByThree.valid).toBe(false);
+  });
+});
+
+describe("Persistencia de imágenes generadas por IA en Supabase Storage", () => {
+  it("construye una ruta segura y determinista dentro del bucket galeria", () => {
+    expect(
+      buildGeneratedAssetStoragePath({
+        branchId: "Sede Centro / Norte",
+        timestamp: 1710000000000,
+        index: 2,
+        mimeType: "image/png",
+      }),
+    ).toBe("Sede_Centro_Norte/ai-1710000000000-2.png");
+
+    expect(
+      buildGeneratedAssetStoragePath({
+        branchId: "",
+        timestamp: 1710000000000,
+        index: 0,
+        mimeType: "image/jpeg",
+      }),
+    ).toBe("general/ai-1710000000000-0.jpg");
+  });
+
+  it("resuelve la extensión del archivo a partir del MIME devuelto por el generador", () => {
+    expect(resolveImageExtension("image/jpeg")).toBe("jpg");
+    expect(resolveImageExtension("image/webp")).toBe("webp");
+    expect(resolveImageExtension("image/png")).toBe("png");
+    expect(resolveImageExtension(undefined)).toBe("png");
+  });
+
+  it("convierte un Data URL base64 en Blob listo para Storage", () => {
+    const blob = dataUrlToBlob("data:image/png;base64,QUJD");
+    expect(blob.type).toBe("image/png");
+    expect(blob.size).toBe(3);
+
+    expect(() => dataUrlToBlob("https://example.com/foto.png")).toThrow(/Data URL/);
   });
 });

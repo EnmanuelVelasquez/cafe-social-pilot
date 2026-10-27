@@ -384,8 +384,7 @@ export function validatePostEditPayload(input: {
 /**
  * Cuenta cuántas publicaciones de la sucursal tienen estado `publicado` / `publicada`
  * dentro del mes y año de referencia (`now`). Si no hay ninguna, devuelve `0`.
- */
-export function countPublishedThisMonth(
+ */export function countPublishedThisMonth(
   list: ReadonlyArray<{ status: string; scheduledAtIso?: string | null | undefined }>,
   now: Date = new Date(),
 ): number {
@@ -406,4 +405,63 @@ export function countPublishedThisMonth(
     }
     return parsed.getFullYear() === targetYear && parsed.getMonth() === targetMonth;
   }).length;
+}
+
+/** Sanitiza un segmento de ruta para Supabase Storage (ids de sucursal, nombres). */
+export function sanitizeStorageSegment(value: string): string {
+  const cleaned = (value ?? "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return cleaned || "general";
+}
+
+/** Extensión de archivo coherente con el MIME devuelto por el generador de imágenes. */
+export function resolveImageExtension(mimeType?: string | undefined): string {
+  const normalized = (mimeType ?? "").toLowerCase().split(";")[0]?.trim() ?? "";
+  if (normalized === "image/jpeg" || normalized === "image/jpg") return "jpg";
+  if (normalized === "image/webp") return "webp";
+  if (normalized === "image/gif") return "gif";
+  return "png";
+}
+
+/**
+ * Ruta determinista dentro del bucket `galeria` para un activo generado por IA:
+ * `${sucursalId}/ai-${timestamp}-${index}.${ext}`.
+ */
+export function buildGeneratedAssetStoragePath(params: {
+  branchId: string;
+  timestamp: number | string;
+  index: number;
+  mimeType?: string | undefined;
+}): string {
+  const branch = sanitizeStorageSegment(params.branchId);
+  const stamp = String(params.timestamp).replace(/[^0-9]/g, "") || "0";
+  const safeIndex = Math.max(0, Math.round(params.index));
+  const extension = resolveImageExtension(params.mimeType);
+  return `${branch}/ai-${stamp}-${safeIndex}.${extension}`;
+}
+
+/**
+ * Convierte un Data URL (`data:image/png;base64,...`) en `Blob` para subirlo
+ * a Supabase Storage desde el generador semanal de imágenes.
+ */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const trimmed = (dataUrl ?? "").trim();
+  const base64Match = /^data:([^;,]+);base64,(.+)$/s.exec(trimmed);
+  if (base64Match?.[1] && base64Match[2]) {
+    const binary = atob(base64Match[2]);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new Blob([bytes], { type: base64Match[1].trim() });
+  }
+
+  const plainMatch = /^data:([^;,]+),(.+)$/s.exec(trimmed);
+  if (plainMatch?.[1] && plainMatch[2]) {
+    return new Blob([decodeURIComponent(plainMatch[2])], { type: plainMatch[1].trim() });
+  }
+
+  throw new Error("Data URL de imagen inválido.");
 }

@@ -16,10 +16,25 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { analyzeAssetImageTags } from "@/lib/ai-engine";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
+  WEEKLY_IMAGE_ASPECT_RATIO_LABELS,
+  WEEKLY_IMAGE_ASPECT_RATIOS,
+  WEEKLY_PILLAR_LABELS,
+  analyzeAssetImageTags,
+  buildWeeklyImagePrompt,
+  calculateWeeklyBatchPlan,
+  generateImageWithGemini,
+  summarizeWeeklyBatchPlan,
+  type GeneratedImage,
+  type WeeklyImageAspectRatio,
+} from "@/lib/ai-engine";
 import {
   assets as sampleAssets,
+  buildGeneratedAssetStoragePath,
   countUnused,
+  dataUrlToBlob,
   extractStoragePath,
   formatTagsString,
   hasAffectedRows,
@@ -33,6 +48,11 @@ import {
 } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
+
+/** Cantidades de piezas ofrecidas para el pack semanal. */
+const WEEKLY_PACK_COUNT_OPTIONS = [1, 3, 5] as const;
+
+type WeeklyPackDraft = GeneratedImage & { key: string };
 
 export const Route = createFileRoute("/activos")({
   head: () => ({
@@ -79,6 +99,16 @@ function Activos() {
     img: string;
     name: string;
   } | null>(null);
+  const [isPackDialogOpen, setIsPackDialogOpen] = useState(false);
+  const [packCount, setPackCount] = useState<number>(3);
+  const [packAspectRatio, setPackAspectRatio] = useState<WeeklyImageAspectRatio>(
+    DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
+  );
+  const [packTheme, setPackTheme] = useState("");
+  const [isGeneratingPack, setIsGeneratingPack] = useState(false);
+  const [isSavingPack, setIsSavingPack] = useState(false);
+  const [packProgress, setPackProgress] = useState({ done: 0, total: 0 });
+  const [packDrafts, setPackDrafts] = useState<WeeklyPackDraft[]>([]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
@@ -365,6 +395,133 @@ function Activos() {
     }
   };
 
+  const handleGenerateWeeklyPack = async () => {
+    if (!sucursalActiva) return;
+
+    const plan = calculateWeeklyBatchPlan({
+      count: packCount,
+      aspectRatio: packAspectRatio,
+    });
+
+    setIsGeneratingPack(true);
+    setPackDrafts([]);
+    setPackProgress({ done: 0, total: plan.length });
+
+    const generated: WeeklyPackDraft[] = [];
+    try {
+      // Se generan de a una pieza para no saturar la cuota por minuto de la API.
+      for (const [index, item] of plan.entries()) {
+        const prompt = buildWeeklyImagePrompt({
+          branchName: sucursalActiva.nombre,
+          pillar: item.pillar,
+          tone: sucursalActiva.tono,
+          negativeRules: sucursalActiva.reglas_negativas,
+          theme: packTheme,
+          aspectRatio: item.aspectRatio,
+          variantIndex: index,
+        });
+
+        const image = await generateImageWithGemini({
+          prompt,
+          pillar: item.pillar,
+          aspectRatio: item.aspectRatio,
+        });
+
+        generated.push({ ...image, key: `${Date.now()}-${index}` });
+        setPackDrafts([...generated]);
+        setPackProgress({ done: index + 1, total: plan.length });
+      }
+
+      toast.success(`Pack semanal de ${generated.length} imágenes generado con IA`);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al generar imágenes: ${error.message}`
+          : "No se pudieron generar las imágenes del pack semanal",
+      );
+    } finally {
+      setIsGeneratingPack(false);
+    }
+  };
+
+  const handleSaveWeeklyPack = async () => {
+    if (!sucursalActiva || packDrafts.length === 0) return;
+
+    if (!supabase) {
+      toast.error(
+        "Configura la conexión con Supabase para guardar las imágenes generadas en la galería",
+      );
+      return;
+    }
+
+    setIsSavingPack(true);
+    const timestamp = Date.now();
+    let savedCount = 0;
+    const loadingToast = toast.loading("Guardando imágenes en la galería...");
+
+    try {
+      for (const [index, draft] of packDrafts.entries()) {
+        const storagePath = buildGeneratedAssetStoragePath({
+          branchId: sucursalActiva.id,
+          timestamp,
+          index,
+          mimeType: draft.mimeType,
+        });
+
+        const { error: uploadError } = await supabase.storage
+          .from("galeria")
+          .upload(storagePath, dataUrlToBlob(draft.dataUrl), {
+            contentType: draft.mimeType,
+            upsert: false,
+          });
+
+        if (uploadError) throw uploadError;
+
+        const {
+          data: { publicUrl },
+        } = supabase.storage.from("galeria").getPublicUrl(storagePath);
+
+        const { data: inserted, error: insertError } = await supabase
+          .from("activos")
+          .insert([
+            {
+              sucursal_id: sucursalActiva.id,
+              url_imagen: publicUrl,
+              tags: formatTagsString(draft.tags.join(", ")),
+              contador_uso: 0,
+            },
+          ])
+          .select()
+          .single();
+
+        if (insertError) throw insertError;
+
+        if (inserted) {
+          setAssetsList((prev) => [mapRowToAsset(inserted, 0), ...prev]);
+        }
+        savedCount += 1;
+      }
+
+      toast.dismiss(loadingToast);
+      toast.success(`${savedCount} imágenes IA guardadas con etiquetas automáticas`);
+      setPackDrafts([]);
+      setIsPackDialogOpen(false);
+    } catch (error: any) {
+      console.error(error);
+      toast.dismiss(loadingToast);
+      toast.error(
+        savedCount > 0
+          ? `Se guardaron ${savedCount} de ${packDrafts.length} imágenes: ${error?.message ?? "error desconocido"}`
+          : error?.message
+            ? `Error al guardar el pack: ${error.message}`
+            : "No se pudieron guardar las imágenes generadas",
+      );
+    } finally {
+      setIsSavingPack(false);
+    }
+  };
+
   if (!sucursalActiva) {
     return (
       <AppShell
@@ -392,13 +549,18 @@ function Activos() {
   const allTags = ["Todos", ...Array.from(new Set(assetsList.flatMap((a) => a.tags)))];
   const list = tag === "Todos" ? assetsList : assetsList.filter((a) => a.tags.includes(tag));
   const unused = countUnused(assetsList);
+  const weeklyPackPlan = calculateWeeklyBatchPlan({
+    count: packCount,
+    aspectRatio: packAspectRatio,
+  });
+  const weeklyPackSummary = summarizeWeeklyBatchPlan(weeklyPackPlan);
 
   return (
     <AppShell
       title="Biblioteca de Activos"
       subtitle={`${sucursalActiva.nombre} · ${assetsList.length} imágenes etiquetadas automáticamente por IA`}
       action={
-        <>
+        <div className="flex flex-wrap items-center gap-2">
           <input
             ref={fileInputRef}
             type="file"
@@ -406,6 +568,14 @@ function Activos() {
             className="hidden"
             onChange={handleFileUpload}
           />
+          <Button
+            variant="outline"
+            size="lg"
+            onClick={() => setIsPackDialogOpen(true)}
+          >
+            <Sparkles className="text-violet" />
+            Pack Semanal IA
+          </Button>
           <Button
             variant="brand"
             size="lg"
@@ -415,7 +585,7 @@ function Activos() {
             {isUploading ? <Loader2 className="animate-spin" /> : <Plus />}
             {isUploading ? "Subiendo..." : "Subir Nuevos Activos"}
           </Button>
-        </>
+        </div>
       }
     >
       {isLowStock(assetsList) && (
@@ -562,6 +732,177 @@ function Activos() {
             <Button variant="brand" onClick={handleSaveTags}>
               Guardar etiquetas
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={isPackDialogOpen}
+        onOpenChange={(open) => {
+          if (!isGeneratingPack && !isSavingPack) setIsPackDialogOpen(open);
+        }}
+      >
+        <DialogContent className="max-h-[88vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Generar Pack Semanal con IA</DialogTitle>
+            <DialogDescription>
+              Imágenes originales para {sucursalActiva.nombre}, adaptadas a su tono de marca y a
+              sus reglas negativas. Se guardan en el banco de activos con etiquetas automáticas.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label>Cantidad de imágenes</Label>
+              <div className="flex gap-2">
+                {WEEKLY_PACK_COUNT_OPTIONS.map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-pressed={packCount === count}
+                    disabled={isGeneratingPack || isSavingPack}
+                    onClick={() => {
+                      setPackCount(count);
+                      setPackDrafts([]);
+                    }}
+                    className={`rounded-full border px-4 py-1.5 text-sm font-medium transition ${
+                      packCount === count
+                        ? "border-primary bg-primary-soft text-primary"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    {count} {count === 1 ? "imagen" : "imágenes"}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Proporción compatible con Meta</Label>
+              <div className="flex flex-wrap gap-2">
+                {WEEKLY_IMAGE_ASPECT_RATIOS.map((ratio) => (
+                  <button
+                    key={ratio}
+                    type="button"
+                    aria-pressed={packAspectRatio === ratio}
+                    disabled={isGeneratingPack || isSavingPack}
+                    onClick={() => {
+                      setPackAspectRatio(ratio);
+                      setPackDrafts([]);
+                    }}
+                    className={`rounded-full border px-3.5 py-1.5 text-sm font-medium transition ${
+                      packAspectRatio === ratio
+                        ? "border-primary bg-primary-soft text-primary"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    {WEEKLY_IMAGE_ASPECT_RATIO_LABELS[ratio]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="weekly-pack-theme">Campaña o indicación de la semana (opcional)</Label>
+              <Textarea
+                id="weekly-pack-theme"
+                rows={2}
+                value={packTheme}
+                disabled={isGeneratingPack || isSavingPack}
+                onChange={(e) => setPackTheme(e.target.value)}
+                placeholder="Ej. Lanzamiento de nuevo servicio, promoción de fin de mes..."
+              />
+            </div>
+
+            <div className="rounded-xl border bg-muted/40 px-3.5 py-3 text-xs text-muted-foreground">
+              <p className="font-semibold text-foreground">Mezcla de pilares del lote</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {weeklyPackSummary.map((summary) => (
+                  <span
+                    key={summary.pillar}
+                    className="rounded-full bg-card px-2.5 py-0.5 font-medium text-foreground"
+                  >
+                    {summary.label} · {summary.count}{" "}
+                    {summary.count === 1 ? "pieza" : "piezas"} · objetivo {summary.sharePercent}%
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            {!supabase && (
+              <p className="text-xs text-warning">
+                Sin conexión a Supabase las imágenes solo se previsualizan: configura
+                VITE_SUPABASE_URL para guardarlas en la galería.
+              </p>
+            )}
+
+            {packDrafts.length > 0 && (
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {packDrafts.map((draft) => (
+                  <figure
+                    key={draft.key}
+                    className="overflow-hidden rounded-xl border bg-card shadow-card"
+                  >
+                    <img
+                      src={draft.dataUrl}
+                      alt={WEEKLY_PILLAR_LABELS[draft.pillar]}
+                      className="w-full object-cover"
+                    />
+                    <figcaption className="space-y-1 p-2">
+                      <p className="text-[11px] font-semibold text-foreground">
+                        {WEEKLY_PILLAR_LABELS[draft.pillar]}
+                      </p>
+                      <div className="flex flex-wrap gap-1">
+                        {draft.tags.map((draftTag) => (
+                          <span
+                            key={draftTag}
+                            className="rounded bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet"
+                          >
+                            {draftTag}
+                          </span>
+                        ))}
+                      </div>
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              disabled={isGeneratingPack || isSavingPack}
+              onClick={() => setIsPackDialogOpen(false)}
+            >
+              Cerrar
+            </Button>
+            <Button
+              variant="brand"
+              disabled={isGeneratingPack || isSavingPack}
+              onClick={handleGenerateWeeklyPack}
+            >
+              {isGeneratingPack ? (
+                <Loader2 className="animate-spin" />
+              ) : (
+                <Sparkles />
+              )}
+              {isGeneratingPack
+                ? `Generando ${packProgress.done}/${packProgress.total}...`
+                : packDrafts.length > 0
+                  ? "Regenerar lote"
+                  : "Generar con IA"}
+            </Button>
+            {packDrafts.length > 0 && (
+              <Button
+                variant="cta"
+                disabled={isGeneratingPack || isSavingPack}
+                onClick={handleSaveWeeklyPack}
+              >
+                {isSavingPack ? <Loader2 className="animate-spin" /> : <Plus />}
+                {isSavingPack ? "Guardando..." : "Guardar en galería"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>

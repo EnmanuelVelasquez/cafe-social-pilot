@@ -1,22 +1,40 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  AI_GENERATED_TAG,
+  DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
+  GEMINI_DEFAULT_IMAGE_MODEL,
   GEMINI_DEFAULT_MODEL,
   MAX_JSON_RETRIES,
+  MAX_WEEKLY_IMAGE_COUNT,
+  WEEKLY_PILLAR_SHARES,
   analyzeAssetImageTags,
   buildGeminiEndpoint,
+  buildGeminiImageEndpoint,
+  buildGeneratedAssetTags,
   buildPostGenerationUserPrompt,
   buildVisionTaggingPrompt,
+  buildWeeklyImagePrompt,
+  calculateWeeklyBatchPlan,
   callGeminiVisionForTags,
+  describeToneVisualStyle,
   extractGeminiResponseText,
   extractInlineDataFromDataUrl,
+  extractInlineImageFromGeminiPayload,
+  generateImageWithGemini,
   generateSocialPostForBranch,
   generateWithRetry,
+  isImagenPredictModel,
+  normalizeWeeklyImageCount,
   parseAndValidateAIPostResponse,
   parseAndValidateVisionTagsResponse,
+  resolveGeminiImageModel,
+  resolveGeminiImageSize,
   resolveGeminiModel,
   resolveInitialPostStatus,
+  resolveWeeklyImageAspectRatio,
   selectBestMatchingAsset,
+  summarizeWeeklyBatchPlan,
 } from "@/lib/ai-engine";
 import type { Asset } from "@/lib/data";
 
@@ -350,5 +368,311 @@ describe("Generación de Copy con Google Gemini sin fallback local (REQ-1.2, REQ
     ).rejects.toThrow(/429/);
 
     expect(mockFetch429).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Generador Semanal de Imágenes con IA (Gemini / Imagen API)", () => {
+  it("reparte un lote de 5 piezas con la mezcla 40% Venta, 30% Educativo y 30% Estilo de vida", () => {
+    expect(WEEKLY_PILLAR_SHARES).toEqual({
+      VENTA: 40,
+      EDUCATIVO: 30,
+      ESTILO_DE_VIDA: 30,
+    });
+
+    const plan = calculateWeeklyBatchPlan({ count: 5, aspectRatio: "4:5" });
+
+    expect(plan).toHaveLength(5);
+    expect(plan.map((item) => item.index)).toEqual([0, 1, 2, 3, 4]);
+    expect(plan.every((item) => item.aspectRatio === "4:5")).toBe(true);
+
+    const counts = plan.reduce<Record<string, number>>((acc, item) => {
+      acc[item.pillar] = (acc[item.pillar] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    expect(counts).toEqual({ VENTA: 2, EDUCATIVO: 2, ESTILO_DE_VIDA: 1 });
+    expect(plan[0]?.sharePercent).toBe(40);
+
+    expect(
+      summarizeWeeklyBatchPlan(plan).map((item) => [item.pillar, item.count, item.sharePercent]),
+    ).toEqual([
+      ["VENTA", 2, 40],
+      ["EDUCATIVO", 2, 30],
+      ["ESTILO_DE_VIDA", 1, 30],
+    ]);
+  });
+
+  it("alterna los pilares para no agrupar el mismo tema en piezas consecutivas", () => {
+    const plan = calculateWeeklyBatchPlan({ count: 3 });
+    expect(plan.map((item) => item.pillar)).toEqual([
+      "VENTA",
+      "EDUCATIVO",
+      "ESTILO_DE_VIDA",
+    ]);
+    expect(plan.every((item) => item.sharePercent > 0)).toBe(true);
+  });
+
+  it("acota la cantidad al rango de 1 a 5 piezas y valida la proporción solicitada", () => {
+    expect(MAX_WEEKLY_IMAGE_COUNT).toBe(5);
+    expect(normalizeWeeklyImageCount(0)).toBe(1);
+    expect(normalizeWeeklyImageCount(99)).toBe(5);
+    expect(normalizeWeeklyImageCount(Number.NaN)).toBe(3);
+    expect(calculateWeeklyBatchPlan({ count: 0 })).toHaveLength(1);
+    expect(calculateWeeklyBatchPlan({ count: 99 })).toHaveLength(5);
+
+    expect(resolveWeeklyImageAspectRatio("9:16")).toBe("9:16");
+    expect(resolveWeeklyImageAspectRatio("16:9")).toBe(DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO);
+    expect(resolveWeeklyImageAspectRatio(undefined)).toBe("4:5");
+  });
+
+  it("construye un prompt visual agnóstico al giro con marca, pilar, tono, campaña y reglas negativas", () => {
+    const prompt = buildWeeklyImagePrompt({
+      branchName: "Clínica Dental Sonrisa",
+      pillar: "EDUCATIVO",
+      tone: "Profesional",
+      negativeRules: "No mostrar instrumental intimidante",
+      theme: "Lanzamiento de ortodoncia invisible",
+      aspectRatio: "9:16",
+      variantIndex: 1,
+    });
+
+    expect(prompt).toContain("Clínica Dental Sonrisa");
+    expect(prompt).toContain("Educativo");
+    expect(prompt).toContain("9:16");
+    expect(prompt).toContain("Lanzamiento de ortodoncia invisible");
+    expect(prompt).toContain("[No mostrar instrumental intimidante]");
+    expect(prompt).toContain("Variante visual #2");
+    expect(prompt).toContain("marcas de agua");
+
+    // Agnóstico: nunca asume un giro de negocio que la sucursal no declaró.
+    expect(prompt.toLowerCase()).not.toContain("café");
+    expect(prompt.toLowerCase()).not.toContain("cafetería");
+    expect(prompt.toLowerCase()).not.toContain("restaurante");
+  });
+
+  it("traduce cada tono de marca en una guía de estilo fotográfico distinta", () => {
+    expect(describeToneVisualStyle("Cercano")).toContain("acogedora");
+    expect(describeToneVisualStyle("Profesional")).toContain("estudio");
+    expect(describeToneVisualStyle("Divertido")).toContain("energía");
+    expect(describeToneVisualStyle(undefined)).toContain("comercial");
+  });
+
+  it("etiqueta los activos generados con #ia_generada y el hashtag del pilar", () => {
+    expect(AI_GENERATED_TAG).toBe("#ia_generada");
+    expect(buildGeneratedAssetTags("VENTA")).toEqual(["#ia_generada", "#venta"]);
+    expect(buildGeneratedAssetTags("EDUCATIVO")).toEqual(["#ia_generada", "#educativo"]);
+    expect(buildGeneratedAssetTags("ESTILO_DE_VIDA")).toEqual([
+      "#ia_generada",
+      "#estilo_de_vida",
+    ]);
+  });
+
+  it("genera la imagen con un modelo Gemini multimodal y devuelve Data URL con etiquetas", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                { text: "Aquí tienes la imagen solicitada" },
+                { inlineData: { mimeType: "image/png", data: "QUJD" } },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    const result = await generateImageWithGemini({
+      prompt: "Fotografía de producto premium sobre fondo neutro",
+      pillar: "VENTA",
+      apiKey: "AIzaSy-image-key",
+      model: "gemini-nano-banana-2.1",
+      aspectRatio: "1:1",
+      imageSize: "2K",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0]?.[0]).toBe(
+      buildGeminiImageEndpoint("gemini-nano-banana-2.1", "AIzaSy-image-key"),
+    );
+    expect(mockFetch.mock.calls[0]?.[0]).toContain(":generateContent");
+
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(body.generationConfig.imageConfig).toEqual({
+      aspectRatio: "1:1",
+      imageSize: "2K",
+    });
+    expect(body.generationConfig.responseModalities).toEqual(["TEXT", "IMAGE"]);
+    expect(body.contents[0].parts[0].text).toContain("producto premium");
+
+    expect(result.mimeType).toBe("image/png");
+    expect(result.dataUrl).toBe("data:image/png;base64,QUJD");
+    expect(result.tags).toEqual(["#ia_generada", "#venta"]);
+    expect(result.aspectRatio).toBe("1:1");
+    expect(result.provider).toBe("gemini");
+  });
+
+  it("usa el endpoint :predict y bytesBase64Encoded para modelos Imagen", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        predictions: [{ mimeType: "image/jpeg", bytesBase64Encoded: "REVG" }],
+      }),
+    });
+
+    const result = await generateImageWithGemini({
+      prompt: "Escena de comunidad en una terraza luminosa",
+      pillar: "ESTILO_DE_VIDA",
+      apiKey: "AIzaSy-imagen-key",
+      model: "imagen-4.0-generate-001",
+      aspectRatio: "9:16",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    const calledUrl = String(mockFetch.mock.calls[0]?.[0]);
+    expect(calledUrl).toContain(":predict");
+    expect(calledUrl).toContain("imagen-4.0-generate-001");
+
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(body.instances[0].prompt).toContain("terraza luminosa");
+    expect(body.parameters).toEqual({ sampleCount: 1, aspectRatio: "9:16" });
+
+    expect(result.mimeType).toBe("image/jpeg");
+    expect(result.base64).toBe("REVG");
+    expect(result.tags).toEqual(["#ia_generada", "#estilo_de_vida"]);
+  });
+
+  it("exige API Key y prompt, y falla si la respuesta no contiene ninguna imagen", async () => {
+    await expect(
+      generateImageWithGemini({
+        prompt: "Escena cualquiera",
+        pillar: "VENTA",
+        apiKey: "",
+      }),
+    ).rejects.toThrow(/VITE_GEMINI_API_KEY/);
+
+    await expect(
+      generateImageWithGemini({
+        prompt: "   ",
+        pillar: "VENTA",
+        apiKey: "AIzaSy-test-key",
+      }),
+    ).rejects.toThrow(/prompt visual/i);
+
+    const textOnlyFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        candidates: [{ content: { parts: [{ text: "No puedo generar esa imagen" }] } }],
+      }),
+    });
+
+    await expect(
+      generateImageWithGemini({
+        prompt: "Escena cualquiera",
+        pillar: "VENTA",
+        apiKey: "AIzaSy-test-key",
+        fetchFn: textOnlyFetch as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/no devolvió ninguna imagen/i);
+  });
+
+  it("propaga el error HTTP de la API de imágenes sin reintentar", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { message: "API key not valid" } }),
+    });
+
+    await expect(
+      generateImageWithGemini({
+        prompt: "Escena cualquiera",
+        pillar: "VENTA",
+        apiKey: "AIzaSy-invalid",
+        fetchFn: mockFetch as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(/403/);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("extrae la imagen de ambos contratos de la API y devuelve null si no hay imagen", () => {
+    expect(
+      extractInlineImageFromGeminiPayload({
+        predictions: [{ bytesBase64Encoded: "AAA" }],
+      }),
+    ).toEqual({ mimeType: "image/png", base64: "AAA" });
+
+    expect(
+      extractInlineImageFromGeminiPayload({
+        candidates: [
+          {
+            content: {
+              parts: [{ inlineData: { mimeType: "image/webp", data: "BBB" } }],
+            },
+          },
+        ],
+      }),
+    ).toEqual({ mimeType: "image/webp", base64: "BBB" });
+
+    expect(extractInlineImageFromGeminiPayload({})).toBeNull();
+    expect(extractInlineImageFromGeminiPayload(null)).toBeNull();
+    expect(
+      extractInlineImageFromGeminiPayload({
+        candidates: [{ content: { parts: [{ text: "solo texto" }] } }],
+      }),
+    ).toBeNull();
+  });
+
+  it("resuelve modelos retirados de imagen y detecta el tipo de endpoint", () => {
+    expect(GEMINI_DEFAULT_IMAGE_MODEL).toBe("gemini-nano-banana-2.1");
+    expect(resolveGeminiImageModel(undefined)).toBe(GEMINI_DEFAULT_IMAGE_MODEL);
+    expect(resolveGeminiImageModel("models/imagen-3.0-generate-001")).toBe(
+      GEMINI_DEFAULT_IMAGE_MODEL,
+    );
+    // El identificador de marcador anterior se migra al modelo real de Nano Banana.
+    expect(resolveGeminiImageModel("gemini-3.8-flash-image")).toBe(
+      GEMINI_DEFAULT_IMAGE_MODEL,
+    );
+    // Los modelos vigentes se respetan tal cual (Nano Banana 2 y Nano Banana Pro).
+    expect(resolveGeminiImageModel("gemini-3.1-flash-image")).toBe(
+      "gemini-3.1-flash-image",
+    );
+    expect(resolveGeminiImageModel("gemini-3-pro-image")).toBe("gemini-3-pro-image");
+    expect(isImagenPredictModel("imagen-4.0-generate-001")).toBe(true);
+    expect(isImagenPredictModel("gemini-nano-banana-2.1")).toBe(false);
+  });
+
+  it("normaliza la resolución opcional y no envía imageSize si no se configura", async () => {
+    expect(resolveGeminiImageSize("2k")).toBe("2K");
+    expect(resolveGeminiImageSize("512px")).toBe("512");
+    expect(resolveGeminiImageSize("0.5K")).toBe("512");
+    expect(resolveGeminiImageSize("")).toBeUndefined();
+    expect(resolveGeminiImageSize("8K")).toBeUndefined();
+
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [{ inlineData: { mimeType: "image/png", data: "QUJD" } }],
+            },
+          },
+        ],
+      }),
+    });
+
+    await generateImageWithGemini({
+      prompt: "Escena de marca sin resolución forzada",
+      pillar: "EDUCATIVO",
+      apiKey: "AIzaSy-image-key",
+      model: "gemini-nano-banana-2.1",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    const body = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(body.generationConfig.imageConfig).toEqual({ aspectRatio: "4:5" });
   });
 });
