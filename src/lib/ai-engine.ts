@@ -350,6 +350,7 @@ export async function callGeminiVisionForTags(params: {
   const model = params.model || GEMINI_DEFAULT_MODEL;
   const inlineData = await resolveImageToInlineData(params.imageUrl, fetchImpl);
   const endpoint = buildGeminiEndpoint(model, params.apiKey);
+  const thinkingConfig = buildGeminiThinkingConfig(model);
 
   const response = await fetchImpl(endpoint, {
     method: "POST",
@@ -380,7 +381,9 @@ export async function callGeminiVisionForTags(params: {
       ],
       generationConfig: {
         responseMimeType: "application/json",
+        responseSchema: VISION_TAGS_RESPONSE_SCHEMA,
         temperature: 0.2,
+        ...(thinkingConfig ? { thinkingConfig } : {}),
       },
     }),
   });
@@ -391,10 +394,10 @@ export async function callGeminiVisionForTags(params: {
 
   const payload = (await response.json()) as {
     candidates?: Array<{
-      content?: { parts?: Array<{ text?: unknown }> };
+      content?: { parts?: GeminiCandidatePart[] };
     }>;
   };
-  const content = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+  const content = extractGeminiResponseText(payload);
   if (!content) {
     throw new Error("Gemini Vision devolvió una respuesta vacía.");
   }
@@ -669,6 +672,7 @@ export async function callGeminiForPost(params: {
   const fetchImpl = params.fetchFn ?? fetch;
   const model = params.model || GEMINI_DEFAULT_MODEL;
   const endpoint = buildGeminiEndpoint(model, params.apiKey);
+  const thinkingConfig = buildGeminiThinkingConfig(model);
 
   const response = await fetchImpl(endpoint, {
     method: "POST",
@@ -687,7 +691,9 @@ export async function callGeminiForPost(params: {
       ],
       generationConfig: {
         responseMimeType: "application/json",
+        responseSchema: AI_POST_RESPONSE_SCHEMA,
         temperature: 0.7,
+        ...(thinkingConfig ? { thinkingConfig } : {}),
       },
     }),
   });
@@ -698,10 +704,10 @@ export async function callGeminiForPost(params: {
 
   const payload = (await response.json()) as {
     candidates?: Array<{
-      content?: { parts?: Array<{ text?: unknown }> };
+      content?: { parts?: GeminiCandidatePart[] };
     }>;
   };
-  const content = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+  const content = extractGeminiResponseText(payload);
   if (!content) {
     throw new Error("Gemini API devolvió una respuesta vacía.");
   }

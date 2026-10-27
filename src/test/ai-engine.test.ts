@@ -8,6 +8,7 @@ import {
   buildPostGenerationUserPrompt,
   buildVisionTaggingPrompt,
   callGeminiVisionForTags,
+  extractGeminiResponseText,
   extractInlineDataFromDataUrl,
   generateSocialPostForBranch,
   generateWithRetry,
@@ -143,6 +144,22 @@ describe("Visión Computacional y Auto-Tagging con Google Gemini (REQ-2.2)", () 
     expect(resolveGeminiModel("gemini-2.5-flash")).toBe("gemini-3.8-flash");
     expect(resolveGeminiModel("models/gemini-2.5-flash")).toBe("gemini-3.8-flash");
     expect(resolveGeminiModel(undefined)).toBe("gemini-3.8-flash");
+  });
+
+  it("ignora bloques internos de razonamiento (thought: true) al extraer el JSON de Gemini", () => {
+    const extracted = extractGeminiResponseText({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { thought: true, text: "Pensando qué copy redactar..." },
+              { text: '{"tags":["#servicio"]}' },
+            ],
+          },
+        },
+      ],
+    });
+    expect(extracted).toBe('{"tags":["#servicio"]}');
   });
 
   it("invoca Gemini Vision (gemini-2.5-flash) con inlineData y devuelve tags normalizados", async () => {
