@@ -272,3 +272,30 @@ export function validatePostEditPayload(input: {
     scheduledIso,
   };
 }
+
+/**
+ * Cuenta cuántas publicaciones de la sucursal tienen estado `publicado` / `publicada`
+ * dentro del mes y año de referencia (`now`). Si no hay ninguna, devuelve `0`.
+ */
+export function countPublishedThisMonth(
+  list: ReadonlyArray<{ status: string; scheduledAtIso?: string | null | undefined }>,
+  now: Date = new Date(),
+): number {
+  const targetYear = now.getFullYear();
+  const targetMonth = now.getMonth();
+
+  return list.filter((item) => {
+    const normalizedStatus = item.status.trim().toLowerCase();
+    if (normalizedStatus !== "publicado" && normalizedStatus !== "publicada") {
+      return false;
+    }
+    if (!item.scheduledAtIso) {
+      return true;
+    }
+    const parsed = new Date(item.scheduledAtIso);
+    if (Number.isNaN(parsed.getTime())) {
+      return true;
+    }
+    return parsed.getFullYear() === targetYear && parsed.getMonth() === targetMonth;
+  }).length;
+}

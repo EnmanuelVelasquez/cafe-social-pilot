@@ -45,6 +45,81 @@ export const MAX_JSON_RETRIES = 2;
 const VALID_POST_TYPES: readonly AIPostType[] = ["FEED_SINGLE", "FEED_CAROUSEL", "STORY"];
 
 /**
+ * Esquema JSON nativo para `generationConfig.responseSchema` en Gemini API,
+ * garantizando que el modelo responda en el primer intento con la estructura exacta de REQ-3.1.
+ */
+export const AI_POST_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    post_type: {
+      type: "STRING",
+      enum: ["FEED_SINGLE", "FEED_CAROUSEL", "STORY"],
+    },
+    copy_text: {
+      type: "STRING",
+    },
+    recommended_visual_tags: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+    },
+    call_to_action_used: {
+      type: "BOOLEAN",
+    },
+  },
+  required: [
+    "post_type",
+    "copy_text",
+    "recommended_visual_tags",
+    "call_to_action_used",
+  ],
+} as const;
+
+export const VISION_TAGS_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    tags: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+    },
+  },
+  required: ["tags"],
+} as const;
+
+interface GeminiCandidatePart {
+  text?: unknown;
+  thought?: boolean | undefined;
+}
+
+/**
+ * Extrae el texto JSON final devuelto por Gemini ignorando partes internas de razonamiento (`thought: true`).
+ */
+export function extractGeminiResponseText(payload: {
+  candidates?: Array<{
+    content?: { parts?: GeminiCandidatePart[] };
+  }>;
+}): string | null {
+  const parts = payload.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts) || parts.length === 0) return null;
+
+  const nonThoughtParts = parts.filter(
+    (part) => !part.thought && typeof part.text === "string" && part.text.trim().length > 0,
+  );
+  const selected =
+    nonThoughtParts[nonThoughtParts.length - 1] ??
+    parts.find((part) => typeof part.text === "string" && part.text.trim().length > 0);
+
+  return typeof selected?.text === "string" ? selected.text : null;
+}
+
+function buildGeminiThinkingConfig(model: string): { thinkingLevel: "LOW" } | undefined {
+  const resolved = resolveGeminiModel(model).toLowerCase();
+  if (resolved.startsWith("gemini-3")) {
+    return { thinkingLevel: "LOW" };
+  }
+  return undefined;
+}
+
+/**
  * Error de transporte HTTP o cuota del proveedor (ej. 400/403 API Key inválida, 429 límite de cuota, 500).
  * No debe reintentarse como si fuera una alucinación de formato JSON.
  */

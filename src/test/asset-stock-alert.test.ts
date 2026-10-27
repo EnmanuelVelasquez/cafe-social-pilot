@@ -5,6 +5,7 @@ import {
   MAX_ASSET_SIZE_BYTES,
   MAX_POST_COPY_LENGTH,
   assets,
+  countPublishedThisMonth,
   countUnused,
   extractStoragePath,
   formatTagsString,
@@ -157,5 +158,31 @@ describe("Edición y Reprogramación de Publicaciones en el Dashboard (Fase B)",
         scheduledAtLocal: "",
       }).valid,
     ).toBe(false);
+  });
+
+  it("cuenta las publicaciones con estado publicado del mes actual y devuelve 0 si no hay ninguna", () => {
+    const refDate = new Date("2026-10-26T12:00:00.000Z");
+
+    expect(countPublishedThisMonth([], refDate)).toBe(0);
+    expect(
+      countPublishedThisMonth(
+        [
+          { status: "pendiente", scheduledAtIso: "2026-10-20T10:00:00.000Z" },
+          { status: "programado", scheduledAtIso: "2026-10-25T10:00:00.000Z" },
+        ],
+        refDate,
+      ),
+    ).toBe(0);
+
+    expect(
+      countPublishedThisMonth(
+        [
+          { status: "publicado", scheduledAtIso: "2026-10-15T10:00:00.000Z" },
+          { status: "publicada", scheduledAtIso: "2026-10-21T10:00:00.000Z" },
+          { status: "publicado", scheduledAtIso: "2026-09-15T10:00:00.000Z" },
+        ],
+        refDate,
+      ),
+    ).toBe(2);
   });
 });

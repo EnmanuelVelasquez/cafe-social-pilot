@@ -46,6 +46,7 @@ import {
   MAX_POST_COPY_LENGTH,
   SUPPORTED_SOCIAL_NETWORKS,
   assets as sampleAssets,
+  countPublishedThisMonth,
   formatScheduledDateLabel,
   hasAffectedRows,
   isZeroInventory,
@@ -179,8 +180,9 @@ function Dashboard() {
         }
 
         if (integrationsRes.data) {
-          const connected = integrationsRes.data.some((i: any) =>
-            Boolean(i.token_cifrado),
+          const connected = integrationsRes.data.some(
+            (i: any) =>
+              Boolean(i.token_cifrado) && !String(i.token_cifrado).startsWith("token_"),
           );
           setHasActiveIntegration(connected);
         }
@@ -216,6 +218,7 @@ function Dashboard() {
   const scheduled = posts.filter(
     (p) => p.status === "programado" || p.status === "programada",
   ).length;
+  const publishedThisMonth = countPublishedThisMonth(posts);
   const zeroInventory = !isLoading && isZeroInventory(branchAssets);
 
   const handleGeneratePost = async () => {
@@ -553,7 +556,7 @@ function Dashboard() {
 
   const stats = [
     { label: "Posts Programados", value: scheduled, icon: CalendarClock, tone: "bg-primary-soft text-primary" },
-    { label: "Publicados este mes", value: 24, icon: CheckCircle2, tone: "bg-success-soft text-success" },
+    { label: "Publicados este mes", value: publishedThisMonth, icon: CheckCircle2, tone: "bg-success-soft text-success" },
     { label: "Activos Disponibles en Galería", value: branchAssets.length, icon: ImageIcon, tone: "bg-violet-soft text-violet" },
   ];
 

@@ -114,54 +114,38 @@ function Settings() {
       toast.error("Selecciona una sucursal primero");
       return;
     }
-    const existing = branchIntegrations.find((i) => i.plataforma === platform);
-    if (!supabase) {
-      toast.success("Estado de integración actualizado");
-      return;
-    }
 
-    try {
-      if (existing) {
-        const nextToken = existing.token_cifrado ? null : `token_${Date.now()}`;
+    const existing = branchIntegrations.find((i) => i.plataforma === platform);
+    const hasRealToken =
+      Boolean(existing?.token_cifrado) &&
+      !String(existing?.token_cifrado).startsWith("token_");
+
+    if (supabase && existing && (hasRealToken || existing.token_cifrado)) {
+      try {
         const { data, error } = await supabase
           .from("integraciones_sociales")
-          .update({ token_cifrado: nextToken })
+          .update({ token_cifrado: null })
           .eq("id", existing.id)
           .select()
           .single();
 
-        if (error) throw error;
-        if (data) {
+        if (!error && data) {
           setBranchIntegrations((prev) =>
             prev.map((item) => (item.id === existing.id ? (data as IntegracionSocial) : item)),
           );
-          toast.success(nextToken ? "Cuenta conectada correctamente" : "Cuenta desconectada");
         }
-      } else {
-        const { data, error } = await supabase
-          .from("integraciones_sociales")
-          .insert([
-            {
-              sucursal_id: sucursalActiva.id,
-              plataforma: platform,
-              token_cifrado: `token_${Date.now()}`,
-            },
-          ])
-          .select()
-          .single();
-
-        if (error) throw error;
-        if (data) {
-          setBranchIntegrations((prev) => [...prev, data as IntegracionSocial]);
-          toast.success("Cuenta conectada correctamente");
+        if (hasRealToken) {
+          toast.success("Cuenta desconectada");
+          return;
         }
+      } catch (error) {
+        console.error(error);
       }
-    } catch (error: any) {
-      console.error(error);
-      toast.error(
-        error?.message ? `Error en integración: ${error.message}` : "No se pudo actualizar la integración",
-      );
     }
+
+    toast.info(
+      "La integración directa con Meta Graph API (OAuth de Instagram Business y Facebook Pages) aún no está conectada. Usa por ahora la publicación manual (Copiar Copy y Descargar Imagen) en el Dashboard.",
+    );
   };
 
   const handleSaveBranch = async () => {
@@ -462,7 +446,9 @@ function Settings() {
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
           {integrations.map((it) => {
             const record = branchIntegrations.find((b) => b.plataforma === it.platform);
-            const isConnected = Boolean(record?.token_cifrado);
+            const isConnected =
+              Boolean(record?.token_cifrado) &&
+              !String(record?.token_cifrado).startsWith("token_");
             return (
               <Card key={it.name} className="shadow-card">
                 <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
