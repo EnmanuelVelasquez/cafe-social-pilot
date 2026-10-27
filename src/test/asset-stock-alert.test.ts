@@ -4,6 +4,7 @@ import {
   LOW_STOCK_THRESHOLD,
   MAX_ASSET_SIZE_BYTES,
   MAX_POST_COPY_LENGTH,
+  MIN_ASSET_DIMENSION_PX,
   assets,
   countPublishedThisMonth,
   countUnused,
@@ -17,6 +18,7 @@ import {
   parseTags,
   toDatetimeLocalInputValue,
   validateAssetFile,
+  validateImageDimensions,
   validatePostEditPayload,
   type Asset,
 } from "@/lib/data";
@@ -184,5 +186,55 @@ describe("Edición y Reprogramación de Publicaciones en el Dashboard (Fase B)",
         refDate,
       ),
     ).toBe(2);
+  });
+});
+
+describe("Validación de dimensiones y relación de aspecto para Meta Graph API (Fase C - REQ-2.1)", () => {
+  it("acepta proporciones oficiales de Feed (4:5 vertical, 1:1 cuadrado, 1.91:1 horizontal) y Stories (9:16)", () => {
+    expect(MIN_ASSET_DIMENSION_PX).toBe(320);
+
+    // 4:5 vertical (1080×1350 -> ratio 0.8)
+    const verticalFeed = validateImageDimensions(1080, 1350);
+    expect(verticalFeed.valid).toBe(true);
+    expect(verticalFeed.format).toBe("FEED");
+
+    // 1:1 cuadrado (1080×1080 -> ratio 1.0)
+    const squareFeed = validateImageDimensions(1080, 1080);
+    expect(squareFeed.valid).toBe(true);
+    expect(squareFeed.format).toBe("FEED");
+
+    // 1.91:1 horizontal (1200×628 -> ratio ~1.9108, dentro del 5% de tolerancia)
+    const landscapeFeed = validateImageDimensions(1200, 628);
+    expect(landscapeFeed.valid).toBe(true);
+    expect(landscapeFeed.format).toBe("FEED");
+
+    // 9:16 Stories / Reels (1080×1920 -> ratio 0.5625)
+    const story = validateImageDimensions(1080, 1920);
+    expect(story.valid).toBe(true);
+    expect(story.format).toBe("STORY");
+  });
+
+  it("rechaza imágenes con resolución menor a 320×320 px o dimensiones inválidas", () => {
+    const tooSmall = validateImageDimensions(280, 280);
+    expect(tooSmall.valid).toBe(false);
+    expect(tooSmall.reason).toContain("320×320");
+
+    expect(validateImageDimensions(0, 1080).valid).toBe(false);
+    expect(validateImageDimensions(-100, 500).valid).toBe(false);
+  });
+
+  it("rechaza imágenes fuera de los rangos de aspecto permitidos por Meta API", () => {
+    // Panorámica extrema (3:1 -> ratio 3.0)
+    const ultraWide = validateImageDimensions(2400, 800);
+    expect(ultraWide.valid).toBe(false);
+    expect(ultraWide.reason).toContain("Relación de aspecto no compatible");
+
+    // Captura demasiado alargada (ratio 0.35, más estrecha que 9:16)
+    const ultraTall = validateImageDimensions(700, 2000);
+    expect(ultraTall.valid).toBe(false);
+
+    // Proporción 2:3 (ratio 0.6667, fuera tanto de Stories 9:16 como de Feed 4:5)
+    const twoByThree = validateImageDimensions(1000, 1500);
+    expect(twoByThree.valid).toBe(false);
   });
 });

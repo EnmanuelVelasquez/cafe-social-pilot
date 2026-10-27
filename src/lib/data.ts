@@ -61,6 +61,19 @@ export const MAX_ASSET_SIZE_BYTES = 8 * 1024 * 1024;
 /** Formatos de imagen soportados por Meta Graph API (REQ-2.1). */
 export const ALLOWED_ASSET_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 
+/** Dimensión mínima en píxeles exigida por Meta Graph API (REQ-2.1). */
+export const MIN_ASSET_DIMENSION_PX = 320;
+
+/** Rango oficial de relación de aspecto (ancho / alto) para Feed de Meta: 4:5 (0.8) a 1.91:1 (1.91). */
+export const META_FEED_MIN_ASPECT_RATIO = 4 / 5;
+export const META_FEED_MAX_ASPECT_RATIO = 1.91;
+
+/** Relación de aspecto oficial para Stories / Reels de Meta: 9:16 (0.5625). */
+export const META_STORY_ASPECT_RATIO = 9 / 16;
+
+/** Tolerancia del 5% para variaciones menores de recorte en cámara o exportación. */
+export const META_ASPECT_RATIO_TOLERANCE = 0.05;
+
 export const countUnused = (list: Asset[]) => list.filter((a) => a.uses === 0).length;
 
 export const isLowStock = (list: Asset[]) => countUnused(list) < LOW_STOCK_THRESHOLD;
@@ -94,6 +107,101 @@ export function validateAssetFile(file: { size: number; type: string }): AssetVa
     };
   }
   return { valid: true };
+}
+
+export interface ImageDimensionValidationResult {
+  valid: boolean;
+  aspectRatio?: number | undefined;
+  format?: "FEED" | "STORY" | undefined;
+  reason?: string | undefined;
+}
+
+/**
+ * Fase C (REQ-2.1): Valida que el ancho, alto y relación de aspecto (`width / height`)
+ * de una imagen cumplan con los rangos permitidos por Meta Graph API:
+ * - Resolución mínima de 320×320 px.
+ * - Feed: entre 4:5 (0.8) y 1.91:1 (incluyendo 1:1 cuadrado), con 5% de tolerancia.
+ * - Stories: 9:16 (0.5625), con 5% de tolerancia.
+ */
+export function validateImageDimensions(
+  width: number,
+  height: number,
+): ImageDimensionValidationResult {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return {
+      valid: false,
+      reason: "No se pudieron leer las dimensiones de la imagen.",
+    };
+  }
+
+  if (width < MIN_ASSET_DIMENSION_PX || height < MIN_ASSET_DIMENSION_PX) {
+    return {
+      valid: false,
+      reason: `Resolución insuficiente (${Math.round(width)}×${Math.round(height)} px). Meta API exige un mínimo de ${MIN_ASSET_DIMENSION_PX}×${MIN_ASSET_DIMENSION_PX} px.`,
+    };
+  }
+
+  const aspectRatio = Number((width / height).toFixed(4));
+
+  const feedMin = META_FEED_MIN_ASPECT_RATIO * (1 - META_ASPECT_RATIO_TOLERANCE);
+  const feedMax = META_FEED_MAX_ASPECT_RATIO * (1 + META_ASPECT_RATIO_TOLERANCE);
+
+  const storyMin = META_STORY_ASPECT_RATIO * (1 - META_ASPECT_RATIO_TOLERANCE);
+  const storyMax = META_STORY_ASPECT_RATIO * (1 + META_ASPECT_RATIO_TOLERANCE);
+
+  if (aspectRatio >= feedMin && aspectRatio <= feedMax) {
+    return {
+      valid: true,
+      aspectRatio,
+      format: "FEED",
+    };
+  }
+
+  if (aspectRatio >= storyMin && aspectRatio <= storyMax) {
+    return {
+      valid: true,
+      aspectRatio,
+      format: "STORY",
+    };
+  }
+
+  return {
+    valid: false,
+    aspectRatio,
+    reason: `Relación de aspecto no compatible con Meta API (${Math.round(width)}×${Math.round(height)} px, proporción ${aspectRatio.toFixed(2)}:1). Usa formato Feed (4:5 vertical, 1:1 cuadrado o hasta 1.91:1 horizontal) o Stories (9:16).`,
+  };
+}
+
+/**
+ * Lee las dimensiones reales (`naturalWidth` y `naturalHeight`) de un archivo de imagen en el navegador
+ * antes de subirlo a Supabase Storage.
+ */
+export function readImageDimensions(
+  file: Blob,
+): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    if (typeof Image === "undefined" || typeof URL === "undefined" || !URL.createObjectURL) {
+      reject(new Error("API de inspección de imagen no disponible en este entorno."));
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      URL.revokeObjectURL(objectUrl);
+      resolve({ width, height });
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("El archivo de imagen está dañado o no se pudo decodificar."));
+    };
+
+    img.src = objectUrl;
+  });
 }
 
 /**

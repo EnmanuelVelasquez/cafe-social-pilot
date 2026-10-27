@@ -26,7 +26,9 @@ import {
   inferTagsFromFilename,
   isLowStock,
   parseTags,
+  readImageDimensions,
   validateAssetFile,
+  validateImageDimensions,
   type Asset,
 } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
@@ -133,6 +135,27 @@ function Activos() {
       return;
     }
 
+    let formatLabel = "Feed";
+    try {
+      const { width, height } = await readImageDimensions(file);
+      const dimValidation = validateImageDimensions(width, height);
+      if (!dimValidation.valid) {
+        toast.error(
+          dimValidation.reason ??
+            "Dimensiones o relación de aspecto no compatibles con Meta API",
+        );
+        event.target.value = "";
+        return;
+      }
+      formatLabel = dimValidation.format === "STORY" ? "Stories (9:16)" : "Feed";
+    } catch (dimError: any) {
+      toast.error(
+        dimError?.message ?? "No se pudieron verificar las dimensiones de la imagen.",
+      );
+      event.target.value = "";
+      return;
+    }
+
     if (!supabase) {
       toast.error("No hay conexión configurada con Supabase");
       event.target.value = "";
@@ -178,7 +201,9 @@ function Activos() {
       }
 
       toast.dismiss(loadingToast);
-      toast.success("Imagen subida correctamente (puedes usar IA Vision desde Editar etiquetas)");
+      toast.success(
+        `Imagen subida para ${formatLabel} (puedes usar IA Vision desde Editar etiquetas)`,
+      );
     } catch (error: any) {
       console.error(error);
       toast.dismiss(loadingToast);
@@ -406,6 +431,10 @@ function Activos() {
           </AlertDescription>
         </Alert>
       )}
+      <div className="mb-4 rounded-xl border bg-muted/40 px-3.5 py-2 text-xs text-muted-foreground">
+        <span className="font-semibold text-foreground">Requisitos Meta API (REQ-2.1):</span>{" "}
+        JPG, PNG o WEBP · Máx. 8 MB · Mín. 320×320 px · Proporción Feed (4:5 vertical, 1:1 cuadrado hasta 1.91:1 horizontal) o Stories (9:16).
+      </div>
       <div className="-mx-4 mb-5 flex gap-2 overflow-x-auto px-4 pb-1">
         {allTags.map((t) => (
           <button
