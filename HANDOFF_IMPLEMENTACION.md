@@ -1,5 +1,10 @@
 # Handoff de Implementación — AutoSocial AI (`connect_real_llm_vision`)
 
+> [!IMPORTANT]
+> **Archivo histórico (desactualizado).** La fuente de verdad actual es `CONTEXTO_HAPPY_PATH.md`
+> (verificado con `76/76` tests y `0` errores de TypeScript el 9-nov-2026). Las cifras `52/52`
+> y el "próximo paso" de este documento ya no aplican.
+
 > **Fecha de actualización:** 26 de octubre de 2026  
 > **Rama activa:** `connect_real_llm_vision`  
 > **Directorio de trabajo:** `C:\Users\emanu\.gemini\antigravity\worktrees\cafe-social-pilot\connect_real_llm_vision`  

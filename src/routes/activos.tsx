@@ -36,7 +36,9 @@ import {
   WEEKLY_IMAGE_ASPECT_RATIO_LABELS,
   WEEKLY_IMAGE_ASPECT_RATIOS,
   analyzeAssetImageTags,
+  calculateWeeklyBatchPlan,
   generateWeeklyImagePromptsWithAI,
+  summarizeWeeklyBatchPlan,
   type WeeklyImageAspectRatio,
   type WeeklyVisualPromptItem,
 } from "@/lib/ai-engine";
@@ -886,6 +888,22 @@ function Activos() {
                   >
                     {count}
                   </button>
+                ))}
+              </div>
+              <p className="text-xs text-muted-foreground">Mezcla de pilares del lote:</p>
+              <div className="flex flex-wrap gap-2">
+                {summarizeWeeklyBatchPlan(
+                  calculateWeeklyBatchPlan({
+                    count: promptCount,
+                    aspectRatio: promptAspectRatio,
+                  }),
+                ).map((item) => (
+                  <span
+                    key={item.pillar}
+                    className="rounded-full border bg-card px-3 py-1 text-xs font-medium"
+                  >
+                    {item.label} · {item.count} de {promptCount} ({item.sharePercent}%)
+                  </span>
                 ))}
               </div>
             </div>

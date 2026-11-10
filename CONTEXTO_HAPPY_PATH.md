@@ -1,15 +1,14 @@
 # Contexto del proyecto — AutoSocial AI
 
 > **Documento de traspaso para abrir un chat nuevo.**
-> **Fecha:** 28 de octubre de 2026
+> **Fecha:** 9 de noviembre de 2026
 > **Rama:** `connect_real_llm_vision`
-> **Último commit:** `548e926` — *feat: "Implementación de la integración con el LLM de generación de imágenes"*
-> **Árbol de trabajo:** limpio al verificar (este documento se añade después, como único archivo nuevo)
-> **Verificación real ejecutada hoy:** `npm run typecheck` ✅ · `npm test` → **68/68** ✅ · `npm run build` ✅
+> **Último commit:** `e8bd177` — *feat: remove IA pack from code*
+> **Árbol de trabajo:** con cambios sin commitear (limpieza del motor de imágenes, ver §4.6)
+> **Verificación real ejecutada hoy:** `npm run typecheck` ✅ · `npm test` → **76/76** ✅ · `npm run build` ✅
 
 Este documento **reemplaza** las cifras y el "próximo paso" de `HANDOFF_IMPLEMENTACION.md`
-(ese archivo quedó desactualizado: decía 52/52 tests y proponía el generador de imágenes,
-que ya está implementado).
+(ese archivo quedó desactualizado: decía 52/52 tests; quedó solo como histórico).
 
 ---
 
@@ -111,24 +110,31 @@ Cambiarlas en Vercel exige **redesplegar**; no aplican a un deployment ya existe
 - Verificación de borrado efectivo vía `hasAffectedRows` (detecta bloqueos RLS) y manejo de FK `23503`.
 - `removeSucursal` en Zustand selecciona automáticamente la siguiente sucursal.
 
-### 4.6 Generador Semanal de Imágenes con IA (lo último implementado)
+### 4.6 Generador Semanal de Prompts Visuales con IA (Paso 1 del MVP, entregado)
 
-- **Plan del lote** (`calculateWeeklyBatchPlan`): 1–5 piezas con mezcla
+> **Decisión de producto (9-nov-2026):** la generación de **imágenes** con IA se **retiró del MVP**
+> y queda para la v2. El flujo genera **prompts en inglés** listos para copiar en ImageFX,
+> Midjourney o DALL·E; así se evita el coste de cuota (429, ver §7).
+
+- **Plan del lote** (`calculateWeeklyBatchPlan`): 1–5 piezas (la UI ofrece `1`, `3`, `5`) con mezcla
   **40 % Venta / 30 % Educativo / 30 % Estilo de vida**, alternando pilares para no repetir seguidos.
-- **Prompt visual** (`buildWeeklyImagePrompt`): marca + tono + pilar + campaña + reglas negativas.
-  Prohíbe texto deformado y marcas de agua. Cero referencias a un giro concreto.
-- **Proporciones**: `1:1`, `4:5`, `9:16` (todas compatibles con Meta).
-- **Llamada al modelo** (`generateImageWithGemini`):
-  - Gemini multimodal → `:generateContent` con `responseModalities: ["TEXT","IMAGE"]` + `imageConfig`.
-  - `imagen-*` → `:predict` (hoy **código muerto**: Imagen fue apagado, ver §7).
-  - Modelo por defecto: **`gemini-nano-banana-2.1`**.
-  - `VITE_GEMINI_IMAGE_SIZE` opcional (`512`/`1K`/`2K`/`4K`); si está vacío **no se envía**.
-  - Migración automática del placeholder antiguo `gemini-3.8-flash-image` al modelo real.
-- **UI**: diálogo "Pack Semanal IA" en Activos con cantidad, proporción, campaña y mezcla de pilares.
-- **Flujo**: generación **secuencial** (evita picos de RPM) → **preview** → el usuario decide →
-  "Guardar en galería" sube a Storage (`${sucursal}/ai-${timestamp}-${index}.png`) e inserta en `activos`
-  con `contador_uso: 0` y tags `#ia_generada` + pilar.
-- Helpers puros: `sanitizeStorageSegment`, `resolveImageExtension`,
+- **Prompt de sistema** (`buildWeeklyVisualPromptsRequest`): nombre de la marca, tono, guía de estilo
+  derivada del tono (`describeToneVisualStyle`), paleta y estilo del Brand Kit, `reserve_logo_space`
+  y las reglas negativas. Cero referencias a un giro concreto.
+- **Contrato de salida** (`parseAndValidateWeeklyPromptsResponse`): por pieza → prompt en **INGLÉS**
+  (proporción, paleta, estilo y la frase literal de espacio para logo + cierre
+  `Avoid: no deformed text, no gibberish letters, no watermarks`), idea en **español** y 3–5 tags en
+  español sin `#`.
+- **Referencias multimodales**: hasta 2 imágenes marcadas `brand_logo`/`brand_reference` en
+  `inlineData` (`extractBrandReferenceAssets` + `fetchImageAsInlineData`); fallo silencioso por imagen.
+- **Modelo**: `gemini-3.8-flash` con `retryUntilValid` (2 reintentos si el JSON no valida).
+- **UI**: diálogo "Generador Semanal de Prompts Visuales (IA)" en Activos (cantidad, proporción,
+  mezcla de pilares, campaña, resumen del Brand Kit) + botón en la alerta de Inventario Cero
+  (`/activos?prompts=1`).
+- **Eliminado del código** (9-nov-2026): `generateImageWithGemini`, `buildWeeklyImagePrompt`,
+  `buildGeminiImageEndpoint`, `resolveGeminiImageModel`, `resolveGeminiImageSize`,
+  `isImagenPredictModel`, `extractInlineImageFromGeminiPayload`, `buildGeneratedAssetTags`,
+  `AI_GENERATED_TAG` y los helpers de Storage `sanitizeStorageSegment`, `resolveImageExtension`,
   `buildGeneratedAssetStoragePath`, `dataUrlToBlob`.
 
 ### 4.7 Calidad y automatización
@@ -139,12 +145,13 @@ Cambiarlas en Vercel exige **redesplegar**; no aplican a un deployment ya existe
 
 ---
 
-## 5. Cobertura de tests (68 tests · 5 archivos)
+## 5. Cobertura de tests (76 tests · 6 archivos)
 
 | Archivo | Cubre |
 |---|---|
-| `src/test/ai-engine.test.ts` | Validación JSON y reintentos; cruce de activos y desgaste; visión y auto-tagging; generación de copy sin fallback; **generador semanal de imágenes** (plan, prompt, endpoints, errores, resolución, migración de modelos) |
-| `src/test/asset-stock-alert.test.ts` | Umbral de stock, inventario cero, validación de archivos, Storage/tags/RLS, edición de publicaciones, métricas, dimensiones Meta, persistencia de imágenes IA |
+| `src/test/ai-engine.test.ts` | Validación JSON y reintentos; cruce de activos y desgaste; visión y auto-tagging; generación de copy sin fallback; **generador semanal de prompts** (mezcla de pilares, proporciones, tono/estilo) |
+| `src/test/asset-stock-alert.test.ts` | Umbral de stock, inventario cero, validación de archivos, Storage/tags/RLS, edición de publicaciones, métricas, dimensiones Meta |
+| `src/test/brand-kit.test.ts` | Brand Kit (`normalizeBrandKit`), flags `reserve_logo_space`, tags `brand_logo`/`brand_reference` |
 | `src/test/brand-pillars.test.ts` | Reparto de pilares que siempre suma 100 %; guardrails de marca |
 | `src/test/branch-store.test.ts` | Store de sucursales y borrado con selección automática |
 | `src/test/app-routing.test.tsx` | Rutas de la app |
@@ -161,8 +168,9 @@ Configurar sucursal → Cargar activos → Generar copy con IA → Aprobar/Progr
 
 | Paso | Estado | Evidencia |
 |---|---|---|
-| 1. Sucursal (nombre, tono, reglas negativas) | ✅ Hecho | `settings.tsx`, `marca.tsx` |
-| 2. Activos (subida, tags, validación Meta) | ✅ Hecho | `activos.tsx`, `data.ts` |
+| 1. Sucursal (nombre, tono, reglas negativas, Brand Kit) | ✅ Hecho | `settings.tsx`, `marca.tsx`, `brand.ts` |
+| 2. Activos (subida, tags, validación Meta, marcado Logo/Referencia) | ✅ Hecho | `activos.tsx`, `data.ts` |
+| 2b. Generador semanal de prompts visuales + Inventario Cero | ✅ Hecho | `activos.tsx`, `index.tsx` |
 | 3. Copy con IA | ✅ Hecho | `index.tsx`, `ai-engine.ts` |
 | 4. Aprobar / programar | ✅ Hecho | estados `pendiente` → `programado` |
 | 5. **Publicar en Instagram/Facebook** | ❌ **NO EXISTE** | **Nada escribe el estado `publicado`** |
@@ -182,20 +190,23 @@ Configurar sucursal → Cargar activos → Generar copy con IA → Aprobar/Progr
 
 ## 7. Bloqueos y limitaciones conocidas
 
-### 7.1 Cuota de imágenes (429)
+> **Actualización 9-nov-2026:** el generador de imágenes se retiró del MVP (§4.6), así que
+> **7.1 a 7.3 quedan como registro histórico** para cuando se reactive en la v2.
+
+### 7.1 Cuota de imágenes (429) — histórico
 
 - La generación de imágenes con la **API de Gemini no es gratis**: el free tier no tiene cuota
   utilizable de imagen. Un 429 con **1 sola imagen** lo confirma.
 - Verificación: `aistudio.google.com/rate-limit` (si el modelo aparece en 0 o no aparece, es de pago).
 - La solución de fondo es **activar facturación** (Tier 1) o cambiar de proveedor.
 
-### 7.2 Imagen 4 está apagado
+### 7.2 Imagen 4 está apagado — histórico
 
 - Documentación oficial (17-sep-2026): *"Imagen models are shut down. Use Nano Banana"*.
 - `imagen-4.0-fast-generate-001` devuelve **404**. La rama `:predict` de `ai-engine.ts`
-  es **código muerto** y conviene eliminarla.
+  fue eliminada el 9-nov-2026 junto con todo el motor de imágenes.
 
-### 7.3 Modelos de imagen válidos hoy
+### 7.3 Modelos de imagen válidos hoy — histórico
 
 | Nombre | ID |
 |---|---|
@@ -298,7 +309,7 @@ tiene la key de Gemini (llega a Google y devuelve 429, no error de key).
 ```bash
 npm run dev        # desarrollo
 npm run typecheck  # tsc --noEmit
-npm test           # vitest run (68 tests)
+npm test           # vitest run (76 tests)
 npm run build      # build de producción
 npm run check      # typecheck + test + build
 npm run lint       # falla por issues preexistentes (no gate)
@@ -333,17 +344,17 @@ tier de pago y trazabilidad por sucursal.
 
 | Archivo | Rol |
 |---|---|
-| `src/lib/ai-engine.ts` | Todo el motor: texto, visión, imágenes, planes, prompts, errores |
-| `src/lib/brand.ts` | Pilares y prompt de sistema de marca |
+| `src/lib/ai-engine.ts` | Todo el motor: texto, visión, planes semanales, prompts visuales, errores |
+| `src/lib/brand.ts` | Pilares, Brand Kit (`normalizeBrandKit`) y tags `brand_logo`/`brand_reference` |
 | `src/lib/data.ts` | Validaciones, Storage, tags, fechas, métricas |
 | `src/lib/store.ts` | Zustand de sucursales |
 | `src/lib/supabase.ts` | Cliente Supabase |
 | `src/routes/index.tsx` | Contenido: generación, edición, programación |
-| `src/routes/activos.tsx` | Banco de activos + Pack Semanal IA |
-| `src/routes/settings.tsx` | Sucursales e integraciones |
+| `src/routes/activos.tsx` | Banco de activos + Generador Semanal de Prompts Visuales |
+| `src/routes/settings.tsx` | Sucursales, Identidad Visual (Brand Kit) e integraciones |
 | `src/routes/marca.tsx` | Brand Engine |
-| `src/types/index.ts` | Tipos del esquema |
-| `src/test/*` | 68 tests |
+| `src/types/index.ts` | Tipos del esquema (`BrandKit`, `Sucursal.brand_kit`) |
+| `src/test/*` | 76 tests |
 | `vite.config.ts` | Config TanStack/Nitro |
 | `.github/workflows/ci.yml` | CI de la rama |
 
@@ -352,7 +363,7 @@ tier de pago y trazabilidad por sucursal.
 ## 14. Cómo retomar en un chat nuevo
 
 1. Leer este documento completo.
-2. Ejecutar `npm run check` para confirmar que la base está verde (68/68).
+2. Ejecutar `npm run check` para confirmar que la base está verde (76/76).
 3. Confirmar el paso elegido en §8 (recomendado: **Paso 1 — Publicación Etapa 1**).
 4. Antes de tocar código, verificar:
    - ¿Hay cuenta de Instagram Business vinculada a una página de Facebook?
