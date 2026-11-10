@@ -17,7 +17,13 @@ const badgeVariants = cva(
         pending:
           "border-transparent bg-status-pending-soft text-status-pending hover:bg-status-pending-soft/80",
         scheduled:
+          "border-transparent bg-primary-soft text-primary hover:bg-primary-soft/80",
+        publishing:
+          "border-transparent bg-violet-soft text-violet hover:bg-violet-soft/80",
+        published:
           "border-transparent bg-success-soft text-success hover:bg-success-soft/80",
+        error:
+          "border-transparent bg-destructive text-destructive-foreground shadow hover:bg-destructive/80",
       },
     },
     defaultVariants: {

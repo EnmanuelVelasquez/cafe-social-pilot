@@ -21,7 +21,7 @@ export const sampleBranches: Sucursal[] = [
   },
 ];
 
-export type Status = "pendiente" | "programado";
+export type Status = "pendiente" | "programado" | "publicando" | "publicado" | "error";
 export interface Post {
   id: number;
   img: string;
@@ -406,7 +406,11 @@ export function validatePostEditPayload(input: {
  * Cuenta cuántas publicaciones de la sucursal tienen estado `publicado` / `publicada`
  * dentro del mes y año de referencia (`now`). Si no hay ninguna, devuelve `0`.
  */export function countPublishedThisMonth(
-  list: ReadonlyArray<{ status: string; scheduledAtIso?: string | null | undefined }>,
+  list: ReadonlyArray<{
+    status: string;
+    scheduledAtIso?: string | null | undefined;
+    publishedAtIso?: string | null | undefined;
+  }>,
   now: Date = new Date(),
 ): number {
   const targetYear = now.getFullYear();
@@ -417,10 +421,11 @@ export function validatePostEditPayload(input: {
     if (normalizedStatus !== "publicado" && normalizedStatus !== "publicada") {
       return false;
     }
-    if (!item.scheduledAtIso) {
+    const refIso = item.publishedAtIso || item.scheduledAtIso;
+    if (!refIso) {
       return true;
     }
-    const parsed = new Date(item.scheduledAtIso);
+    const parsed = new Date(refIso);
     if (Number.isNaN(parsed.getTime())) {
       return true;
     }

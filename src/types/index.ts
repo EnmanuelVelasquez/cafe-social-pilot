@@ -37,6 +37,13 @@ export interface Activo {
   created_at?: string;
 }
 
+export type PublishStatus =
+  | "pendiente"
+  | "programado"
+  | "publicando"
+  | "publicado"
+  | "error";
+
 export interface Publicacion {
   id: string;
   sucursal_id: string;
@@ -45,6 +52,10 @@ export interface Publicacion {
   red_social: string;
   estado: string;
   activo_id: string;
+  ultimo_error?: string | null | undefined;
+  intentos?: number | undefined;
+  publicado_en?: string | null | undefined;
+  id_externo?: string | null | undefined;
   created_at?: string;
 }
 
@@ -52,7 +63,10 @@ export interface IntegracionSocial {
   id: string;
   sucursal_id: string;
   plataforma: string;
-  token_cifrado: string;
+  token_cifrado: string | null;
+  page_id?: string | null | undefined;
+  ig_user_id?: string | null | undefined;
+  token_expira_en?: string | null | undefined;
   created_at?: string;
 }
 

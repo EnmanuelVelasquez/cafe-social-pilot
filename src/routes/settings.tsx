@@ -23,6 +23,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { normalizeBrandKit } from "@/lib/brand";
 import { extractStoragePath, hasAffectedRows, isMissingBrandKitColumnError } from "@/lib/data";
+import { isIntegrationTokenExpired } from "@/lib/publish";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { BrandKit, IntegracionSocial, Sucursal } from "@/types";
@@ -575,9 +576,11 @@ function Settings() {
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
           {integrations.map((it) => {
             const record = branchIntegrations.find((b) => b.plataforma === it.platform);
+            const isExpired = isIntegrationTokenExpired(record);
             const isConnected =
               Boolean(record?.token_cifrado) &&
-              !String(record?.token_cifrado).startsWith("token_");
+              !String(record?.token_cifrado).startsWith("token_") &&
+              !isExpired;
             return (
               <Card key={it.name} className="shadow-card">
                 <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
@@ -586,13 +589,27 @@ function Settings() {
                       <div key={i} className="grid h-10 w-10 place-items-center rounded-xl bg-primary-soft text-primary"><I className="h-5 w-5" /></div>
                     ))}
                   </div>
-                  <Badge variant={isConnected ? "scheduled" : "secondary"}>
-                    {isConnected ? "Conectado" : "Desconectado"}
+                  <Badge
+                    variant={
+                      isExpired ? "error" : isConnected ? "published" : "secondary"
+                    }
+                  >
+                    {isExpired
+                      ? "Token Expirado (190)"
+                      : isConnected
+                        ? "Conectado"
+                        : "Modo Etapa 1 (Server Secret)"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="space-y-1">
+                <CardContent className="space-y-2">
                   <CardTitle className="font-display text-base">{it.name}</CardTitle>
                   <CardDescription>{it.desc}</CardDescription>
+                  {(record?.page_id || record?.ig_user_id) && (
+                    <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground space-y-1">
+                      {record?.page_id && <p>Page ID: <span className="font-mono text-foreground">{record.page_id}</span></p>}
+                      {record?.ig_user_id && <p>IG User ID: <span className="font-mono text-foreground">{record.ig_user_id}</span></p>}
+                    </div>
+                  )}
                 </CardContent>
                 <CardFooter>
                   <Button
