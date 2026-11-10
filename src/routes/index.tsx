@@ -19,6 +19,7 @@ import {
   TriangleAlert,
   Plug,
   Repeat,
+  Wand2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
@@ -610,9 +611,17 @@ function Dashboard() {
             <span>
               Esta sucursal no tiene imágenes disponibles. Por seguridad, el bot detiene la generación para nunca publicar texto suelto en Meta.
             </span>
-            <Button variant="outline" size="sm" asChild>
-              <Link to="/activos">Subir Activos</Link>
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/activos">Subir Activos</Link>
+              </Button>
+              <Button variant="brand" size="sm" asChild>
+                <Link to="/activos" search={{ prompts: true }}>
+                  <Wand2 className="h-3.5 w-3.5" />
+                  Generar Prompts con IA
+                </Link>
+              </Button>
+            </div>
           </AlertDescription>
         </Alert>
       )}

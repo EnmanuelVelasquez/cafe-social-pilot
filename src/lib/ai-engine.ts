@@ -1,6 +1,6 @@
-import { buildBrandSystemPrompt, type Pillar } from "@/lib/brand";
+import { buildBrandSystemPrompt, normalizeBrandKit, type Pillar } from "@/lib/brand";
 import { inferTagsFromFilename, type Asset } from "@/lib/data";
-import type { Sucursal } from "@/types";
+import type { BrandKit, Sucursal } from "@/types";
 
 export type AIPostType = "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY";
 export type AIProviderSource = "gemini" | "webhook";
@@ -1327,5 +1327,415 @@ export async function generateImageWithGemini(
     base64: inlineImage.base64,
     dataUrl: `data:${inlineImage.mimeType};base64,${inlineImage.base64}`,
     tags: buildGeneratedAssetTags(params.pillar),
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Generador Semanal de Prompts Visuales con IA (gemini-3.8-flash)
+ *
+ * Regla de negocio: en lugar de gastar cuota generando imágenes, el motor
+ * produce prompts fotográficos en INGLÉS listos para copiar en ImageFX,
+ * Midjourney o DALL·E, más una explicación en español y etiquetas sugeridas.
+ * El lote respeta la mezcla 40/30/30 y el Brand Kit de la sucursal.
+ * ------------------------------------------------------------------------- */
+
+/** Etiquetas exactas que devuelve el modelo en `pilar`. */
+export const WEEKLY_PROMPT_PILLAR_LABELS = WEEKLY_CONTENT_PILLARS.map(
+  (pillar) => WEEKLY_PILLAR_LABELS[pillar],
+);
+
+export const WEEKLY_IMAGE_PROMPTS_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    prompts: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          pilar: {
+            type: "STRING",
+            enum: WEEKLY_PROMPT_PILLAR_LABELS,
+          },
+          idea_espanol: { type: "STRING" },
+          prompt_ingles: { type: "STRING" },
+          suggested_tags: {
+            type: "ARRAY",
+            items: { type: "STRING" },
+          },
+        },
+        required: ["pilar", "idea_espanol", "prompt_ingles", "suggested_tags"],
+      },
+    },
+  },
+  required: ["prompts"],
+} as const;
+
+export interface WeeklyVisualPromptItem {
+  pillar: WeeklyContentPillar;
+  pillarLabel: string;
+  idea_espanol: string;
+  prompt_ingles: string;
+  suggested_tags: string[];
+}
+
+function normalizeLookupToken(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const PILLAR_BY_LOOKUP: ReadonlyMap<string, WeeklyContentPillar> = new Map(
+  WEEKLY_CONTENT_PILLARS.flatMap((pillar) => [
+    [normalizeLookupToken(pillar), pillar] as const,
+    [normalizeLookupToken(WEEKLY_PILLAR_LABELS[pillar]), pillar] as const,
+  ]),
+);
+
+function normalizeSuggestedTags(raw: unknown, pillar: WeeklyContentPillar): string[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const normalized = list
+    .map((tag) => String(tag).replace(/^#+/, "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const unique = Array.from(new Set(normalized)).slice(0, 5);
+  if (unique.length > 0) return unique;
+
+  return [WEEKLY_PILLAR_HASHTAGS[pillar].replace(/^#+/, "")];
+}
+
+/**
+ * Valida la respuesta JSON del modelo y la convierte en piezas tipadas.
+ * Acepta el JSON envuelto en un bloque markdown, igual que el resto del motor.
+ */
+export function parseAndValidateWeeklyPromptsResponse(
+  raw: unknown,
+): WeeklyVisualPromptItem[] {
+  let parsed: unknown = raw;
+
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(stripMarkdownCodeFence(raw));
+    } catch {
+      throw new Error("Respuesta de IA no es un JSON válido.");
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("La respuesta de prompts debe ser un objeto JSON.");
+  }
+
+  const prompts = (parsed as { prompts?: unknown }).prompts;
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    throw new Error("La respuesta de prompts debe incluir una lista no vacía en 'prompts'.");
+  }
+
+  return prompts.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new Error(`La pieza #${index + 1} de prompts no es un objeto válido.`);
+    }
+
+    const record = item as Record<string, unknown>;
+    const rawPillar = record["pilar"];
+    const idea = record["idea_espanol"];
+    const prompt = record["prompt_ingles"];
+
+    const pillar =
+      typeof rawPillar === "string"
+        ? PILLAR_BY_LOOKUP.get(normalizeLookupToken(rawPillar))
+        : undefined;
+
+    if (!pillar) {
+      throw new Error(`La pieza #${index + 1} tiene un pilar inválido o ausente.`);
+    }
+    if (typeof idea !== "string" || idea.trim().length === 0) {
+      throw new Error(`La pieza #${index + 1} no incluye 'idea_espanol'.`);
+    }
+    if (typeof prompt !== "string" || prompt.trim().length === 0) {
+      throw new Error(`La pieza #${index + 1} no incluye 'prompt_ingles'.`);
+    }
+
+    return {
+      pillar,
+      pillarLabel: WEEKLY_PILLAR_LABELS[pillar],
+      idea_espanol: idea.trim(),
+      prompt_ingles: prompt.trim(),
+      suggested_tags: normalizeSuggestedTags(record["suggested_tags"], pillar),
+    };
+  });
+}
+
+export interface WeeklyPromptsBranchInput {
+  nombre: string;
+  tono?: string | undefined;
+  reglas_negativas?: string | undefined;
+  brand_kit?: BrandKit | null | undefined;
+}
+
+export interface WeeklyVisualPromptsRequestParams {
+  branch: WeeklyPromptsBranchInput;
+  count: number;
+  aspectRatio?: string | undefined;
+  campaignContext?: string | undefined;
+  /** Cuántas imágenes de referencia se adjuntarán al modelo (máx. 2). */
+  referenceCount?: number | undefined;
+}
+
+export interface WeeklyVisualPromptsRequest {
+  systemPrompt: string;
+  userPrompt: string;
+  plan: WeeklyBatchPlanItem[];
+  brandKit: BrandKit;
+  aspectRatio: WeeklyImageAspectRatio;
+}
+
+/**
+ * Construye el prompt de sistema y de usuario para el generador de prompts
+ * visuales. Es una función pura: no hace red ni lee variables de entorno.
+ */
+export function buildWeeklyVisualPromptsRequest(
+  params: WeeklyVisualPromptsRequestParams,
+): WeeklyVisualPromptsRequest {
+  const plan = calculateWeeklyBatchPlan({
+    count: params.count,
+    aspectRatio: params.aspectRatio,
+  });
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+  const brandKit = normalizeBrandKit(params.branch.brand_kit);
+  const branchName = params.branch.nombre.trim() || "la marca";
+  const tone = params.branch.tono?.trim() || "Cercano";
+  const negativeRules = params.branch.reglas_negativas?.trim();
+  const campaign = params.campaignContext?.trim();
+  const referenceCount = Math.min(2, Math.max(0, Math.trunc(params.referenceCount ?? 0)));
+
+  const palette = [
+    brandKit.primary_color ? `primary ${brandKit.primary_color}` : "",
+    brandKit.secondary_color ? `secondary ${brandKit.secondary_color}` : "",
+    brandKit.accent_color ? `accent ${brandKit.accent_color}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const systemPrompt = [
+    `Eres un director de arte senior especializado en fotografía publicitaria para redes sociales. Trabajas para la marca "${branchName}".`,
+    `Tono de comunicación obligatorio: ${tone}.`,
+    palette ? `Paleta de marca obligatoria: ${palette}.` : "",
+    brandKit.visual_style ? `Estilo visual declarado por la marca: ${brandKit.visual_style}.` : "",
+    brandKit.reserve_logo_space
+      ? "Todas las composiciones deben dejar una zona limpia y despejada para superponer el logo de la marca."
+      : "",
+    negativeRules
+      ? `Reglas negativas de la marca (tradúcelas al inglés dentro del prompt visual): [${negativeRules}].`
+      : "",
+    "Nunca asumas el giro de negocio, el producto ni el sector de la marca: trabaja solo con los datos recibidos.",
+    "Cada pieza del lote debe ser visualmente distinta de las demás (encuadre, ángulo, momento y luz), manteniendo coherencia de marca.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const planLines = plan.map(
+    (item, index) =>
+      `${index + 1}. Pilar: ${item.label} — objetivo: ${describeWeeklyPillarObjective(item.pillar)}.`,
+  );
+
+  const userPrompt = [
+    `Genera exactamente ${plan.length} ${plan.length === 1 ? "idea" : "ideas"} de prompts visuales para un lote semanal de la marca "${branchName}".`,
+    `Formato de todas las piezas: ${aspectRatio}.`,
+    campaign ? `Campaña o contexto de la semana: ${campaign}.` : "",
+    referenceCount > 0
+      ? `Se adjuntan ${referenceCount} ${referenceCount === 1 ? "imagen de referencia" : "imágenes de referencia"} de la marca: úsalas solo para respetar paleta, iluminación y estilo, sin copiar su composición literal.`
+      : "",
+    "Plan de pilares del lote:",
+    ...planLines,
+    'Devuelve ÚNICAMENTE un JSON válido con la forma { "prompts": [ { "pilar": "...", "idea_espanol": "...", "prompt_ingles": "...", "suggested_tags": ["..."] } ] }.',
+    `El campo "pilar" debe ser exactamente uno de: ${WEEKLY_PROMPT_PILLAR_LABELS.join(" | ")}.`,
+    'El campo "idea_espanol" debe explicar en 1 o 2 líneas el objetivo visual de la pieza, en español.',
+    `El campo "prompt_ingles" debe estar 100% en inglés, listo para copiar en ImageFX, Midjourney o DALL·E: incluye "aspect ratio ${aspectRatio}", la paleta de marca en hexadecimal, el estilo visual, iluminación, composición y tipo de plano.`,
+    brandKit.reserve_logo_space
+      ? 'Si la marca reserva espacio para el logo, incluye literalmente la frase "clean uncluttered negative space in the corner for brand logo overlay".'
+      : "",
+    'Termina cada "prompt_ingles" con una cláusula "Avoid:" que traduzca al inglés las reglas negativas de la marca y añada siempre "no deformed text, no gibberish letters, no watermarks".',
+    'El campo "suggested_tags" debe contener de 3 a 5 etiquetas en español, en minúsculas y sin el símbolo #, listas para asignarse a un activo.',
+    "No incluyas texto legible dentro de la imagen ni logotipos inventados.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return { systemPrompt, userPrompt, plan, brandKit, aspectRatio };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchImageAsInlineData(
+  url: string,
+  fetchImpl: typeof fetch,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const response = await fetchImpl(url);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    const mimeType =
+      typeof blob.type === "string" && blob.type.startsWith("image/")
+        ? blob.type
+        : "image/jpeg";
+    const buffer = await blob.arrayBuffer();
+    return { mimeType, data: bytesToBase64(new Uint8Array(buffer)) };
+  } catch {
+    // Fallback silencioso: una referencia rota no debe abortar la generación.
+    return null;
+  }
+}
+
+/**
+ * Reintenta la llamada al proveedor mientras la validación del JSON falle.
+ * Los errores HTTP de cuota/autenticación se propagan de inmediato.
+ */
+export async function retryUntilValid<T>(
+  providerCall: (attempt: number) => Promise<unknown>,
+  validate: (raw: unknown) => T,
+  maxRetries = MAX_JSON_RETRIES,
+): Promise<T> {
+  let lastError: Error = new Error("Fallo en generación de IA");
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const raw = await providerCall(attempt);
+      return validate(raw);
+    } catch (err) {
+      if (err instanceof AIProviderHttpError) {
+        throw err;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+  throw new Error(
+    `Generación abortada tras ${maxRetries + 1} intentos por JSON inválido: ${lastError.message}`,
+  );
+}
+
+export interface GenerateWeeklyPromptsParams {
+  branch: WeeklyPromptsBranchInput;
+  count: number;
+  aspectRatio?: string | undefined;
+  campaignContext?: string | undefined;
+  referenceImageUrls?: string[] | undefined;
+  apiKey?: string | undefined;
+  model?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}
+
+export interface GeneratedWeeklyPrompts {
+  provider: "gemini";
+  model: string;
+  aspectRatio: WeeklyImageAspectRatio;
+  items: WeeklyVisualPromptItem[];
+  plan: WeeklyBatchPlanItem[];
+  referenceImagesUsed: number;
+}
+
+/**
+ * Genera el lote semanal de prompts visuales con `gemini-3.8-flash`.
+ * Adjunta hasta 2 imágenes de marca (`brand_logo` / `brand_reference`) y
+ * degrada silenciosamente si alguna URL falla.
+ */
+export async function generateWeeklyImagePromptsWithAI(
+  params: GenerateWeeklyPromptsParams,
+): Promise<GeneratedWeeklyPrompts> {
+  const apiKey = (
+    params.apiKey ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
+    ""
+  ).trim();
+  if (!apiKey) {
+    throw new Error(
+      "No hay API Key de Gemini configurada para generar prompts visuales. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+    );
+  }
+
+  const fetchImpl = params.fetchFn ?? fetch;
+  const model = resolveGeminiModel(
+    params.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
+
+  const referenceUrls = (params.referenceImageUrls ?? [])
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  const referenceParts = (
+    await Promise.all(referenceUrls.map((url) => fetchImageAsInlineData(url, fetchImpl)))
+  ).filter((part): part is { mimeType: string; data: string } => part !== null);
+
+  const request = buildWeeklyVisualPromptsRequest({
+    branch: params.branch,
+    count: params.count,
+    aspectRatio: params.aspectRatio,
+    campaignContext: params.campaignContext,
+    referenceCount: referenceParts.length,
+  });
+
+  const thinkingConfig = buildGeminiThinkingConfig(model);
+  const endpoint = buildGeminiEndpoint(model, apiKey);
+
+  const items = await retryUntilValid(
+    async () => {
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: request.systemPrompt }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: request.userPrompt },
+                ...referenceParts.map((part) => ({
+                  inlineData: { mimeType: part.mimeType, data: part.data },
+                })),
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: WEEKLY_IMAGE_PROMPTS_RESPONSE_SCHEMA,
+            temperature: 0.8,
+            ...(thinkingConfig ? { thinkingConfig } : {}),
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw await buildGeminiHttpError(response, "Gemini Prompts");
+      }
+
+      const payload = (await response.json()) as {
+        candidates?: Array<{ content?: { parts?: GeminiCandidatePart[] } }>;
+      };
+      const content = extractGeminiResponseText(payload);
+      if (!content) {
+        throw new Error("Gemini Prompts devolvió una respuesta vacía.");
+      }
+      return content;
+    },
+    parseAndValidateWeeklyPromptsResponse,
+  );
+
+  return {
+    provider: "gemini",
+    model,
+    aspectRatio: request.aspectRatio,
+    items,
+    plan: request.plan,
+    referenceImagesUsed: referenceParts.length,
   };
 }

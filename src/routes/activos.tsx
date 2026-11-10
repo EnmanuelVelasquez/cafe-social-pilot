@@ -1,9 +1,23 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Loader2, Pencil, Plus, Repeat, Sparkles, Store, Trash2, TriangleAlert } from "lucide-react";
+import {
+  Copy,
+  ImagePlus,
+  Loader2,
+  Palette,
+  Pencil,
+  Plus,
+  Repeat,
+  Sparkles,
+  Store,
+  Trash2,
+  TriangleAlert,
+  Wand2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import {
@@ -26,10 +40,21 @@ import {
   buildWeeklyImagePrompt,
   calculateWeeklyBatchPlan,
   generateImageWithGemini,
+  generateWeeklyImagePromptsWithAI,
   summarizeWeeklyBatchPlan,
   type GeneratedImage,
   type WeeklyImageAspectRatio,
+  type WeeklyVisualPromptItem,
 } from "@/lib/ai-engine";
+import {
+  BRAND_LOGO_TAG,
+  BRAND_REFERENCE_TAG,
+  extractBrandReferenceAssets,
+  hasBrandTag,
+  normalizeBrandKit,
+  toggleBrandTag,
+  type BrandTag,
+} from "@/lib/brand";
 import {
   assets as sampleAssets,
   buildGeneratedAssetStoragePath,
@@ -55,6 +80,13 @@ const WEEKLY_PACK_COUNT_OPTIONS = [1, 3, 5] as const;
 type WeeklyPackDraft = GeneratedImage & { key: string };
 
 export const Route = createFileRoute("/activos")({
+  validateSearch: (search: Record<string, unknown>): { prompts?: boolean } => {
+    const wantsPrompts =
+      search["prompts"] === true ||
+      search["prompts"] === "1" ||
+      search["prompts"] === 1;
+    return wantsPrompts ? { prompts: true } : {};
+  },
   head: () => ({
     meta: [
       { title: "Biblioteca de Activos — AutoSocial AI" },
@@ -88,6 +120,7 @@ function mapRowToAsset(d: any, index: number): Asset {
 
 function Activos() {
   const { sucursalActiva } = useBranchStore();
+  const { prompts: openPromptsOnLoad } = Route.useSearch();
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [tag, setTag] = useState("Todos");
   const [isUploading, setIsUploading] = useState(false);
@@ -109,7 +142,35 @@ function Activos() {
   const [isSavingPack, setIsSavingPack] = useState(false);
   const [packProgress, setPackProgress] = useState({ done: 0, total: 0 });
   const [packDrafts, setPackDrafts] = useState<WeeklyPackDraft[]>([]);
+  const [isPromptsDialogOpen, setIsPromptsDialogOpen] = useState(false);
+  const [promptCount, setPromptCount] = useState<number>(3);
+  const [promptAspectRatio, setPromptAspectRatio] = useState<WeeklyImageAspectRatio>(
+    DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
+  );
+  const [promptCampaign, setPromptCampaign] = useState("");
+  const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
+  const [promptItems, setPromptItems] = useState<WeeklyVisualPromptItem[]>([]);
+  const [promptMeta, setPromptMeta] = useState<{
+    model: string;
+    references: number;
+    aspectRatio: WeeklyImageAspectRatio;
+  } | null>(null);
+  const [togglingBrandId, setTogglingBrandId] = useState<string | number | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const brandKit = normalizeBrandKit(sucursalActiva?.brand_kit);
+  const brandReferenceAssets = extractBrandReferenceAssets(assetsList, 2);
+  const brandKitColors = [
+    { label: "Primario", value: brandKit.primary_color },
+    { label: "Secundario", value: brandKit.secondary_color },
+    { label: "Acento", value: brandKit.accent_color },
+  ].filter((entry): entry is { label: string; value: string } => Boolean(entry.value));
+
+  useEffect(() => {
+    if (openPromptsOnLoad) {
+      setIsPromptsDialogOpen(true);
+    }
+  }, [openPromptsOnLoad]);
 
   useEffect(() => {
     setTag("Todos");
@@ -522,6 +583,104 @@ function Activos() {
     }
   };
 
+  const copyToClipboard = async (text: string, successMessage: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success(successMessage);
+    } catch (error) {
+      console.error(error);
+      toast.error("No se pudo copiar al portapapeles. Copia el texto manualmente.");
+    }
+  };
+
+  const handleToggleBrandTag = async (asset: Asset, brandTag: BrandTag) => {
+    if (!supabase) {
+      toast.error("Configura Supabase para guardar las etiquetas de marca");
+      return;
+    }
+
+    const nextTagsString = toggleBrandTag(asset.tags.join(", "), brandTag);
+    const nextTags = parseTags(nextTagsString);
+    const willBeActive = hasBrandTag(nextTags, brandTag);
+
+    setTogglingBrandId(asset.id);
+    setAssetsList((prev) =>
+      prev.map((item) => (item.id === asset.id ? { ...item, tags: nextTags } : item)),
+    );
+
+    try {
+      const { data, error } = await supabase
+        .from("activos")
+        .update({ tags: formatTagsString(nextTagsString) })
+        .eq("id", asset.id)
+        .select();
+
+      if (error) throw error;
+      if (!hasAffectedRows(data)) {
+        throw new Error(
+          "Supabase bloqueó la actualización (0 filas afectadas). Activa la política RLS de UPDATE para la tabla 'activos'.",
+        );
+      }
+
+      toast.success(
+        willBeActive
+          ? `Activo marcado como ${brandTag === BRAND_LOGO_TAG ? "Logo" : "Referencia de Marca"}`
+          : `Etiqueta ${brandTag === BRAND_LOGO_TAG ? "Logo" : "Referencia de Marca"} removida`,
+      );
+    } catch (error: any) {
+      console.error(error);
+      setAssetsList((prev) =>
+        prev.map((item) => (item.id === asset.id ? { ...item, tags: asset.tags } : item)),
+      );
+      toast.error(
+        error?.message
+          ? `No se pudo actualizar la etiqueta de marca: ${error.message}`
+          : "No se pudo actualizar la etiqueta de marca",
+      );
+    } finally {
+      setTogglingBrandId(null);
+    }
+  };
+
+  const handleGeneratePrompts = async () => {
+    if (!sucursalActiva) return;
+
+    setIsGeneratingPrompts(true);
+    setPromptItems([]);
+
+    try {
+      const result = await generateWeeklyImagePromptsWithAI({
+        branch: {
+          nombre: sucursalActiva.nombre,
+          tono: sucursalActiva.tono,
+          reglas_negativas: sucursalActiva.reglas_negativas,
+          brand_kit: sucursalActiva.brand_kit,
+        },
+        count: promptCount,
+        aspectRatio: promptAspectRatio,
+        campaignContext: promptCampaign,
+        referenceImageUrls: brandReferenceAssets.map((asset) => asset.img),
+      });
+
+      setPromptItems(result.items);
+      setPromptMeta({
+        model: result.model,
+        references: result.referenceImagesUsed,
+        aspectRatio: result.aspectRatio,
+      });
+      toast.success(`${result.items.length} prompts visuales generados con IA`);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al generar prompts: ${error.message}`
+          : "No se pudieron generar los prompts visuales",
+      );
+    } finally {
+      setIsGeneratingPrompts(false);
+    }
+  };
+
   if (!sucursalActiva) {
     return (
       <AppShell
@@ -571,6 +730,14 @@ function Activos() {
           <Button
             variant="outline"
             size="lg"
+            onClick={() => setIsPromptsDialogOpen(true)}
+          >
+            <Wand2 className="text-violet" />
+            Generar Prompts con IA
+          </Button>
+          <Button
+            variant="outline"
+            size="lg"
             onClick={() => setIsPackDialogOpen(true)}
           >
             <Sparkles className="text-violet" />
@@ -596,8 +763,19 @@ function Activos() {
               ? "Solo queda 1 imagen sin usar en el banco"
               : `Solo quedan ${unused} imágenes sin usar en el banco`}
           </AlertTitle>
-          <AlertDescription>
-            Sube nuevos activos para que la IA no repita las mismas fotos en tus próximas publicaciones.
+          <AlertDescription className="flex flex-wrap items-center justify-between gap-3">
+            <span>
+              Sube nuevos activos para que la IA no repita las mismas fotos en tus próximas publicaciones.
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setIsPromptsDialogOpen(true)}
+            >
+              <Wand2 className="h-3.5 w-3.5 text-violet" />
+              Generar Prompts con IA
+            </Button>
           </AlertDescription>
         </Alert>
       )}
@@ -667,6 +845,21 @@ function Activos() {
                     )}
                   </Button>
                 </div>
+                {(hasBrandTag(a.tags, BRAND_LOGO_TAG) ||
+                  hasBrandTag(a.tags, BRAND_REFERENCE_TAG)) && (
+                  <div className="absolute bottom-2 left-2 flex flex-wrap gap-1">
+                    {hasBrandTag(a.tags, BRAND_LOGO_TAG) && (
+                      <Badge variant="scheduled" className="shadow">
+                        Logo
+                      </Badge>
+                    )}
+                    {hasBrandTag(a.tags, BRAND_REFERENCE_TAG) && (
+                      <Badge variant="secondary" className="shadow">
+                        Referencia
+                      </Badge>
+                    )}
+                  </div>
+                )}
               </div>
               <figcaption className="p-3">
                 <p className="truncate text-sm font-semibold">{a.name}</p>
@@ -679,6 +872,32 @@ function Activos() {
                       {t}
                     </span>
                   ))}
+                </div>
+                <div className="mt-2 flex flex-wrap gap-1">
+                  <Button
+                    type="button"
+                    variant={hasBrandTag(a.tags, BRAND_LOGO_TAG) ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    title="Marcar como logo de la marca"
+                    disabled={togglingBrandId === a.id}
+                    onClick={() => handleToggleBrandTag(a, BRAND_LOGO_TAG)}
+                  >
+                    <ImagePlus className="h-3 w-3" />
+                    Logo
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={hasBrandTag(a.tags, BRAND_REFERENCE_TAG) ? "default" : "outline"}
+                    size="sm"
+                    className="h-7 px-2 text-[11px]"
+                    title="Marcar como referencia visual de la marca"
+                    disabled={togglingBrandId === a.id}
+                    onClick={() => handleToggleBrandTag(a, BRAND_REFERENCE_TAG)}
+                  >
+                    <Palette className="h-3 w-3" />
+                    Referencia
+                  </Button>
                 </div>
               </figcaption>
             </figure>
@@ -903,6 +1122,225 @@ function Activos() {
                 {isSavingPack ? "Guardando..." : "Guardar en galería"}
               </Button>
             )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={isPromptsDialogOpen} onOpenChange={setIsPromptsDialogOpen}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Wand2 className="h-5 w-5 text-violet" />
+              Generador Semanal de Prompts Visuales (IA)
+            </DialogTitle>
+            <DialogDescription>
+              Gemini analiza el Brand Kit y hasta 2 imágenes de referencia para escribir prompts en
+              inglés listos para ImageFX, Midjourney o DALL·E. Los prompts no gastan cuota de
+              generación de imágenes.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="rounded-xl border bg-muted/40 p-3">
+                <p className="text-xs font-semibold text-foreground">Paleta del Brand Kit</p>
+                {brandKitColors.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {brandKitColors.map((color) => (
+                      <span
+                        key={color.label}
+                        className="inline-flex items-center gap-1.5 rounded-full bg-card px-2 py-0.5 text-[11px] font-medium"
+                      >
+                        <span
+                          className="h-3 w-3 rounded-full border"
+                          style={{ backgroundColor: color.value }}
+                        />
+                        {color.label} · {color.value}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Sin colores configurados. Añádelos en Configuración → Identidad Visual (Brand
+                    Kit).
+                  </p>
+                )}
+                {brandKit.visual_style && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Estilo: {brandKit.visual_style}
+                  </p>
+                )}
+              </div>
+
+              <div className="rounded-xl border bg-muted/40 p-3">
+                <p className="text-xs font-semibold text-foreground">Imágenes de referencia</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {brandReferenceAssets.length > 0
+                    ? `Se usarán ${brandReferenceAssets.length} ${
+                        brandReferenceAssets.length === 1 ? "imagen" : "imágenes"
+                      } marcadas como Logo / Referencia.`
+                    : "Ninguna imagen marcada. Usa los botones Logo o Referencia en un activo para mejorar la coherencia visual."}
+                </p>
+                {brandReferenceAssets.length > 0 && (
+                  <div className="mt-2 flex gap-2">
+                    {brandReferenceAssets.map((asset) => (
+                      <img
+                        key={asset.id}
+                        src={asset.img}
+                        alt={asset.name}
+                        className="h-12 w-12 rounded-md border object-cover"
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Cantidad de piezas</Label>
+              <div className="flex flex-wrap gap-2">
+                {WEEKLY_PACK_COUNT_OPTIONS.map((count) => (
+                  <button
+                    key={count}
+                    type="button"
+                    aria-pressed={promptCount === count}
+                    disabled={isGeneratingPrompts}
+                    onClick={() => {
+                      setPromptCount(count);
+                      setPromptItems([]);
+                    }}
+                    className={`rounded-full border px-4 py-1.5 text-sm font-medium transition ${
+                      promptCount === count
+                        ? "border-primary bg-primary-soft text-primary"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    {count}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Proporción</Label>
+              <div className="flex flex-wrap gap-2">
+                {WEEKLY_IMAGE_ASPECT_RATIOS.map((ratio) => (
+                  <button
+                    key={ratio}
+                    type="button"
+                    aria-pressed={promptAspectRatio === ratio}
+                    disabled={isGeneratingPrompts}
+                    onClick={() => {
+                      setPromptAspectRatio(ratio);
+                      setPromptItems([]);
+                    }}
+                    className={`rounded-full border px-3.5 py-1.5 text-sm font-medium transition ${
+                      promptAspectRatio === ratio
+                        ? "border-primary bg-primary-soft text-primary"
+                        : "bg-card hover:bg-muted"
+                    }`}
+                  >
+                    {WEEKLY_IMAGE_ASPECT_RATIO_LABELS[ratio]}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="weekly-prompts-campaign">Tema o campaña (opcional)</Label>
+              <Textarea
+                id="weekly-prompts-campaign"
+                rows={2}
+                value={promptCampaign}
+                disabled={isGeneratingPrompts}
+                onChange={(e) => setPromptCampaign(e.target.value)}
+                placeholder="Ej. Lanzamiento de temporada, promoción de fin de mes..."
+              />
+            </div>
+
+            {promptMeta && (
+              <p className="text-xs text-muted-foreground">
+                Generado con {promptMeta.model} · Formato{" "}
+                {WEEKLY_IMAGE_ASPECT_RATIO_LABELS[promptMeta.aspectRatio]} ·{" "}
+                {promptMeta.references}{" "}
+                {promptMeta.references === 1 ? "referencia usada" : "referencias usadas"}.
+              </p>
+            )}
+
+            {promptItems.length > 0 && (
+              <div className="space-y-3">
+                {promptItems.map((item, index) => (
+                  <div
+                    key={`${item.pillar}-${index}`}
+                    className="space-y-2 rounded-xl border bg-card p-3"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <Badge variant="secondary">{item.pillarLabel}</Badge>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          copyToClipboard(item.prompt_ingles, "Prompt en inglés copiado")
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copiar Prompt (EN)
+                      </Button>
+                    </div>
+                    <p className="text-sm text-foreground">{item.idea_espanol}</p>
+                    <pre className="max-h-44 overflow-y-auto whitespace-pre-wrap rounded-lg bg-muted p-3 font-mono text-xs text-foreground">
+                      {item.prompt_ingles}
+                    </pre>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-1">
+                        {item.suggested_tags.map((suggestedTag) => (
+                          <span
+                            key={suggestedTag}
+                            className="rounded bg-violet-soft px-1.5 py-0.5 text-[10px] font-medium text-violet"
+                          >
+                            #{suggestedTag}
+                          </span>
+                        ))}
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          copyToClipboard(item.suggested_tags.join(", "), "Etiquetas copiadas")
+                        }
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                        Copiar Tags
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              disabled={isGeneratingPrompts}
+              onClick={() => setIsPromptsDialogOpen(false)}
+            >
+              Cerrar
+            </Button>
+            <Button
+              variant="brand"
+              disabled={isGeneratingPrompts}
+              onClick={handleGeneratePrompts}
+            >
+              {isGeneratingPrompts ? <Loader2 className="animate-spin" /> : <Wand2 />}
+              {isGeneratingPrompts
+                ? "Generando prompts..."
+                : promptItems.length > 0
+                  ? "Regenerar prompts"
+                  : "Generar prompts"}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

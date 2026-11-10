@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2, Trash2, Loader2, TriangleAlert } from "lucide-react";
+import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2, Trash2, Loader2, TriangleAlert, Palette } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
 import {
@@ -18,12 +18,14 @@ import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle }
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
-import { extractStoragePath, hasAffectedRows } from "@/lib/data";
+import { normalizeBrandKit } from "@/lib/brand";
+import { extractStoragePath, hasAffectedRows, isMissingBrandKitColumnError } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
-import type { IntegracionSocial, Sucursal } from "@/types";
+import type { BrandKit, IntegracionSocial, Sucursal } from "@/types";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({
@@ -48,12 +50,19 @@ const integrations = [
   },
 ];
 
+const BRAND_COLOR_FIELDS = [
+  { key: "primary_color", label: "Color primario" },
+  { key: "secondary_color", label: "Color secundario" },
+  { key: "accent_color", label: "Color de acento" },
+] as const;
+
 function Settings() {
   const { sucursales, sucursalActiva, setSucursales, setSucursalActiva, removeSucursal } = useBranchStore();
 
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
   const [rules, setRules] = useState("");
+  const [brandKit, setBrandKit] = useState<BrandKit>({});
   const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [isDeletingBranch, setIsDeletingBranch] = useState(false);
@@ -85,10 +94,12 @@ function Settings() {
       setName(sucursalActiva.nombre ?? "");
       setTone(sucursalActiva.tono ?? "");
       setRules(sucursalActiva.reglas_negativas ?? "");
+      setBrandKit(normalizeBrandKit(sucursalActiva.brand_kit));
     } else {
       setName("");
       setTone("");
       setRules("");
+      setBrandKit({});
     }
   }, [sucursalActiva]);
 
@@ -148,10 +159,21 @@ function Settings() {
     );
   };
 
+  const updateBrandColor = (
+    key: (typeof BRAND_COLOR_FIELDS)[number]["key"],
+    value: string,
+  ) => {
+    setBrandKit((prev) => ({
+      ...prev,
+      [key]: value.trim() ? value.toUpperCase() : undefined,
+    }));
+  };
+
   const handleSaveBranch = async () => {
     const cleanName = (name ?? "").trim();
     const cleanTone = (tone ?? "").trim();
     const cleanRules = (rules ?? "").trim();
+    const cleanBrandKit = normalizeBrandKit(brandKit);
 
     if (!cleanName) {
       toast.error("El nombre de la sucursal es obligatorio");
@@ -165,12 +187,23 @@ function Settings() {
       toast.error("Selecciona o crea una sucursal primero");
       return;
     }
+
+    const hasInvalidColor = BRAND_COLOR_FIELDS.some(({ key }) => {
+      const raw = (brandKit[key] ?? "").trim();
+      return raw.length > 0 && !cleanBrandKit[key];
+    });
+    if (hasInvalidColor) {
+      toast.error("Los colores del Brand Kit deben tener formato hexadecimal (#RGB o #RRGGBB)");
+      return;
+    }
+
     if (!supabase) {
       const updated: Sucursal = {
         ...sucursalActiva,
         nombre: cleanName,
         tono: cleanTone || "Cercano",
         reglas_negativas: cleanRules,
+        brand_kit: cleanBrandKit,
       };
       setSucursalActiva(updated);
       setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
@@ -179,28 +212,53 @@ function Settings() {
     }
 
     try {
-      const { data, error } = await supabase
+      const basePayload = {
+        nombre: cleanName,
+        tono: cleanTone || "Cercano",
+        reglas_negativas: cleanRules,
+      };
+
+      let response = await supabase
         .from("sucursales")
-        .update({
-          nombre: cleanName,
-          tono: cleanTone || "Cercano",
-          reglas_negativas: cleanRules,
-        })
+        .update({ ...basePayload, brand_kit: cleanBrandKit })
         .eq("id", sucursalActiva.id)
         .select();
 
-      if (error) throw error;
-      if (!data || data.length === 0) {
+      let brandKitPersisted = true;
+
+      // Fallback: si la columna `brand_kit` aún no existe en el proyecto remoto,
+      // se guarda el resto de la sucursal y se conserva el Brand Kit en el store local.
+      if (response.error && isMissingBrandKitColumnError(response.error)) {
+        brandKitPersisted = false;
+        response = await supabase
+          .from("sucursales")
+          .update(basePayload)
+          .eq("id", sucursalActiva.id)
+          .select();
+      }
+
+      if (response.error) throw response.error;
+      if (!response.data || response.data.length === 0) {
         toast.error(
           "No se pudo actualizar la sucursal en Supabase. Verifica las políticas RLS (UPDATE) de la tabla 'sucursales'.",
         );
         return;
       }
 
-      const updated = data[0] as Sucursal;
+      const updated: Sucursal = {
+        ...(response.data[0] as Sucursal),
+        brand_kit: cleanBrandKit,
+      };
       setSucursalActiva(updated);
       setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
-      toast.success("Cambios de sucursal guardados en Supabase");
+
+      if (brandKitPersisted) {
+        toast.success("Cambios de sucursal guardados en Supabase");
+      } else {
+        toast.warning(
+          "Se guardó la sucursal, pero el Brand Kit no se persistió: falta la columna 'brand_kit'. Ejecuta el ALTER TABLE en Supabase.",
+        );
+      }
     } catch (error: any) {
       console.error(error);
       toast.error(
@@ -396,6 +454,77 @@ function Settings() {
                   placeholder={'Nunca mencionar a la competencia. No usar "barato" ni "instantáneo".'}
                   disabled={!sucursalActiva}
                 />
+              </div>
+
+              <div className="space-y-4 rounded-xl border bg-muted/40 p-4">
+                <div className="flex items-center gap-2">
+                  <Palette className="h-4 w-4 text-violet" />
+                  <p className="text-sm font-semibold text-foreground">Identidad Visual (Brand Kit)</p>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  La IA usa estos datos para describir la paleta, el estilo y el espacio del logo en
+                  los prompts visuales. Todo es opcional.
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {BRAND_COLOR_FIELDS.map(({ key, label }) => (
+                    <div key={key} className="space-y-2">
+                      <Label htmlFor={`brand-${key}`}>{label}</Label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id={`brand-${key}`}
+                          type="color"
+                          aria-label={label}
+                          value={brandKit[key] ?? "#FFFFFF"}
+                          onChange={(e) => updateBrandColor(key, e.target.value)}
+                          disabled={!sucursalActiva}
+                          className="h-9 w-12 shrink-0 cursor-pointer rounded-md border border-input bg-card p-0.5 disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                        <Input
+                          value={brandKit[key] ?? ""}
+                          onChange={(e) => updateBrandColor(key, e.target.value)}
+                          placeholder="#RRGGBB"
+                          disabled={!sucursalActiva}
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="brand-visual-style">Estilo visual</Label>
+                  <Textarea
+                    id="brand-visual-style"
+                    rows={2}
+                    value={brandKit.visual_style ?? ""}
+                    onChange={(e) =>
+                      setBrandKit((prev) => ({
+                        ...prev,
+                        visual_style: e.target.value.trim() ? e.target.value : undefined,
+                      }))
+                    }
+                    placeholder="Ej. Minimalista moderno, iluminación cálida, estilo editorial."
+                    disabled={!sucursalActiva}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="brand-reserve-logo">Reservar espacio para el logo</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Añade una zona limpia en la composición para superponer el logo después.
+                    </p>
+                  </div>
+                  <Switch
+                    id="brand-reserve-logo"
+                    checked={brandKit.reserve_logo_space ?? false}
+                    onCheckedChange={(checked) =>
+                      setBrandKit((prev) => ({ ...prev, reserve_logo_space: checked }))
+                    }
+                    disabled={!sucursalActiva}
+                  />
+                </div>
               </div>
             </CardContent>
             <CardFooter className="flex flex-wrap items-center justify-between gap-3">

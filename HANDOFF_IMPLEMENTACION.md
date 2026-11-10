@@ -14,6 +14,7 @@
   1. **Lógica de negocio en funciones puras:** Umbrales, proporciones, validaciones y cálculos viven como funciones puras en `src/lib/` con pruebas unitarias colocadas en `src/test/` — nunca inline dentro de archivos de rutas (`src/routes/`).
   2. **Tokens semánticos de color:** Nunca usar colores hexadecimales crudos en componentes; usar únicamente tokens de `src/styles.css` y variantes de componentes.
   3. **Sincronización con Lovable / Git:** No reescribir historial publicado (`--force`, `rebase` o `amend` de commits ya subidos).
+  
   4. **Esquema de Base de Datos intacto:** Respetar estrictamente las tablas de Supabase (`perfiles`, `sucursales`, `activos`, `publicaciones`, `integraciones`).
   5. **TypeScript estricto:** El proyecto usa `strict: true` y `exactOptionalPropertyTypes: true` (las propiedades opcionales deben declararse explícitamente con `| undefined` cuando reciben valores opcionales).
 

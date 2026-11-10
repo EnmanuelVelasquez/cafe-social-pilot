@@ -217,6 +217,27 @@ export function extractStoragePath(publicUrl: string, bucket = "galeria"): strin
 }
 
 /**
+ * Detecta el error de PostgREST/Postgres cuando la columna `brand_kit` todavía
+ * no existe en el proyecto remoto (migración pendiente). Permite degradar sin
+ * bloquear el guardado del resto de campos de la sucursal.
+ */
+export function isMissingBrandKitColumnError(
+  error: { code?: string | undefined; message?: string | undefined } | null | undefined,
+): boolean {
+  if (!error) return false;
+  if (error.code === "PGRST204" || error.code === "42703") return true;
+
+  const message = (error.message ?? "").toLowerCase();
+  if (!message.includes("brand_kit")) return false;
+
+  return (
+    message.includes("does not exist") ||
+    message.includes("schema cache") ||
+    message.includes("could not find")
+  );
+}
+
+/**
  * Convierte el campo `tags` de Supabase (texto separado por comas o arreglo) en lista de etiquetas.
  */
 export function parseTags(raw: unknown): string[] {
