@@ -16,6 +16,7 @@ import {
   publishToFacebookPage,
   publishToInstagramFeed,
   resolveMetaAccountCredentials,
+  sanitizeMetaAccessToken,
 } from "@/lib/publish";
 import type { PublishStatus } from "@/types";
 
@@ -369,6 +370,77 @@ describe("Etapa 4 · Límite de 25 publicaciones / 24h en Instagram y cola de de
 });
 
 describe("Etapa 4 · Flujo HTTP de Meta Graph API (Instagram y Facebook con fetch inyectado)", () => {
+  it("limpia comillas, prefijos Bearer, asignaciones y saltos de línea en sanitizeMetaAccessToken", () => {
+    expect(sanitizeMetaAccessToken('  "EAAG123456"  ')).toBe("EAAG123456");
+    expect(sanitizeMetaAccessToken("Bearer EAAG123456")).toBe("EAAG123456");
+    expect(sanitizeMetaAccessToken("META_PAGE_ACCESS_TOKEN=EAAG123456\n")).toBe(
+      "EAAG123456",
+    );
+    expect(
+      sanitizeMetaAccessToken("https://graph.facebook.com/me?access_token=EAAG999&fields=id"),
+    ).toBe("EAAG999");
+  });
+
+  it("clasifica el error 2500 (App Token sin usuario activo) con instrucciones claras en español", () => {
+    const classified = classifyMetaGraphError(
+      {
+        error: {
+          message:
+            "An active access token must be used to query information about the current user.",
+          type: "OAuthException",
+          code: 2500,
+        },
+      },
+      400,
+    );
+    expect(classified.code).toBe(2500);
+    expect(classified.category).toBe("PERMISSION_DENIED");
+    expect(classified.userMessage).toContain("2500");
+    expect(classified.userMessage).toContain("Graph API Explorer");
+  });
+
+  it("hace fallback automático a GET /me cuando el token ya es un Page Access Token y /me/accounts devuelve error #100", async () => {
+    const responses = [
+      // 1. /me/accounts falla porque es un nodo Page
+      new Response(
+        JSON.stringify({
+          error: {
+            message: "(#100) Tried accessing nonexisting field (accounts) on node type (Page)",
+            type: "OAuthException",
+            code: 100,
+          },
+        }),
+        { status: 400 },
+      ),
+      // 2. Fallback a /me?fields=id,name,instagram_business_account responde con los datos de la página
+      new Response(
+        JSON.stringify({
+          id: "page-direct-777",
+          name: "Café Don Juan - Norte",
+          instagram_business_account: { id: "ig-direct-555" },
+        }),
+        { status: 200 },
+      ),
+    ];
+
+    const mockFetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(responses.shift()!),
+    );
+
+    const creds = await resolveMetaAccountCredentials({
+      accessToken: "EAAG_direct_page_token",
+      network: "Facebook",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    expect(creds).toEqual({
+      pageId: "page-direct-777",
+      pageAccessToken: "EAAG_direct_page_token",
+      igUserId: "ig-direct-555",
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
   it("resuelve page_id e ig_user_id desde /me/accounts cuando no están cacheados en BD", async () => {
     const mockFetch = vi.fn().mockResolvedValue(
       new Response(

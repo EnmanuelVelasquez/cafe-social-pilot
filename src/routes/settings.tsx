@@ -24,6 +24,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { normalizeBrandKit } from "@/lib/brand";
 import { extractStoragePath, hasAffectedRows, isMissingBrandKitColumnError } from "@/lib/data";
 import { isIntegrationTokenExpired } from "@/lib/publish";
+import { syncMetaIntegrationServerFn } from "@/lib/publish-server";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { BrandKit, IntegracionSocial, Sucursal } from "@/types";
@@ -65,6 +66,9 @@ function Settings() {
   const [rules, setRules] = useState("");
   const [brandKit, setBrandKit] = useState<BrandKit>({});
   const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
+  const [pageIdInput, setPageIdInput] = useState("");
+  const [igUserIdInput, setIgUserIdInput] = useState("");
+  const [isSyncingMeta, setIsSyncingMeta] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [isDeletingBranch, setIsDeletingBranch] = useState(false);
 
@@ -107,57 +111,73 @@ function Settings() {
   useEffect(() => {
     if (!sucursalActiva || !supabase) {
       setBranchIntegrations([]);
+      setPageIdInput("");
+      setIgUserIdInput("");
       return;
     }
 
     supabase
       .from("integraciones_sociales")
-      .select("*")
+      .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
       .eq("sucursal_id", sucursalActiva.id)
       .then(({ data, error }) => {
         if (!error && data) {
-          setBranchIntegrations(data as IntegracionSocial[]);
+          const rows = data as IntegracionSocial[];
+          setBranchIntegrations(rows);
+          const metaRow =
+            rows.find((r) => r.plataforma === "Instagram_Graph_API") ?? rows[0];
+          setPageIdInput(metaRow?.page_id ?? "");
+          setIgUserIdInput(metaRow?.ig_user_id ?? "");
         }
       });
   }, [sucursalActiva?.id]);
 
-  const handleToggleIntegration = async (platform: string) => {
+  const handleSyncMetaIntegration = async () => {
     if (!sucursalActiva) {
       toast.error("Selecciona una sucursal primero");
       return;
     }
 
-    const existing = branchIntegrations.find((i) => i.plataforma === platform);
-    const hasRealToken =
-      Boolean(existing?.token_cifrado) &&
-      !String(existing?.token_cifrado).startsWith("token_");
+    setIsSyncingMeta(true);
+    try {
+      const result = await syncMetaIntegrationServerFn({
+        data: {
+          sucursalId: sucursalActiva.id,
+          pageId: pageIdInput.trim() || undefined,
+          igUserId: igUserIdInput.trim() || undefined,
+        },
+      });
 
-    if (supabase && existing && (hasRealToken || existing.token_cifrado)) {
-      try {
-        const { data, error } = await supabase
-          .from("integraciones_sociales")
-          .update({ token_cifrado: null })
-          .eq("id", existing.id)
-          .select()
-          .single();
-
-        if (!error && data) {
-          setBranchIntegrations((prev) =>
-            prev.map((item) => (item.id === existing.id ? (data as IntegracionSocial) : item)),
-          );
-        }
-        if (hasRealToken) {
-          toast.success("Cuenta desconectada");
-          return;
-        }
-      } catch (error) {
-        console.error(error);
+      if (!result.ok) {
+        toast.error(
+          result.errorMessage ?? "No se pudo verificar la integración con Meta Graph API.",
+        );
+        return;
       }
-    }
 
-    toast.info(
-      "La integración directa con Meta Graph API (OAuth de Instagram Business y Facebook Pages) aún no está conectada. Usa por ahora la publicación manual (Copiar Copy y Descargar Imagen) en el Dashboard.",
-    );
+      setPageIdInput(result.pageId ?? "");
+      setIgUserIdInput(result.igUserId ?? "");
+
+      if (supabase) {
+        const { data } = await supabase
+          .from("integraciones_sociales")
+          .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
+          .eq("sucursal_id", sucursalActiva.id);
+        if (data) {
+          setBranchIntegrations(data as IntegracionSocial[]);
+        }
+      }
+
+      toast.success(
+        `Integración con Meta verificada${result.pageId ? ` (Page ID: ${result.pageId})` : ""}`,
+      );
+    } catch (error: any) {
+      toast.error(
+        error?.message ?? "Error al sincronizar la integración con el servidor.",
+      );
+    } finally {
+      setIsSyncingMeta(false);
+    }
   };
 
   const updateBrandColor = (
@@ -578,9 +598,7 @@ function Settings() {
             const record = branchIntegrations.find((b) => b.plataforma === it.platform);
             const isExpired = isIntegrationTokenExpired(record);
             const isConnected =
-              Boolean(record?.token_cifrado) &&
-              !String(record?.token_cifrado).startsWith("token_") &&
-              !isExpired;
+              Boolean(record?.page_id || record?.ig_user_id) && !isExpired;
             return (
               <Card key={it.name} className="shadow-card">
                 <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
@@ -597,28 +615,62 @@ function Settings() {
                     {isExpired
                       ? "Token Expirado (190)"
                       : isConnected
-                        ? "Conectado"
+                        ? "Conectado (Etapa 1)"
                         : "Modo Etapa 1 (Server Secret)"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="space-y-2">
-                  <CardTitle className="font-display text-base">{it.name}</CardTitle>
-                  <CardDescription>{it.desc}</CardDescription>
-                  {(record?.page_id || record?.ig_user_id) && (
-                    <div className="rounded-lg bg-muted p-2.5 text-xs text-muted-foreground space-y-1">
-                      {record?.page_id && <p>Page ID: <span className="font-mono text-foreground">{record.page_id}</span></p>}
-                      {record?.ig_user_id && <p>IG User ID: <span className="font-mono text-foreground">{record.ig_user_id}</span></p>}
+                <CardContent className="space-y-3">
+                  <div>
+                    <CardTitle className="font-display text-base">{it.name}</CardTitle>
+                    <CardDescription>{it.desc}</CardDescription>
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    <div className="space-y-1">
+                      <Label htmlFor="meta-page-id" className="text-xs">
+                        Facebook Page ID (opcional si el token resuelve /me)
+                      </Label>
+                      <Input
+                        id="meta-page-id"
+                        value={pageIdInput}
+                        onChange={(e) => setPageIdInput(e.target.value)}
+                        placeholder="Ej. 123456789012345"
+                        className="font-mono text-xs"
+                        disabled={!sucursalActiva || isSyncingMeta}
+                      />
                     </div>
-                  )}
+                    <div className="space-y-1">
+                      <Label htmlFor="meta-ig-user-id" className="text-xs">
+                        Instagram Business User ID (opcional)
+                      </Label>
+                      <Input
+                        id="meta-ig-user-id"
+                        value={igUserIdInput}
+                        onChange={(e) => setIgUserIdInput(e.target.value)}
+                        placeholder="Ej. 17841400000000000"
+                        className="font-mono text-xs"
+                        disabled={!sucursalActiva || isSyncingMeta}
+                      />
+                    </div>
+                  </div>
                 </CardContent>
                 <CardFooter>
                   <Button
-                    variant={isConnected ? "outline" : "cta"}
+                    variant="cta"
                     className="w-full"
-                    onClick={() => handleToggleIntegration(it.platform)}
+                    disabled={!sucursalActiva || isSyncingMeta}
+                    onClick={handleSyncMetaIntegration}
                   >
-                    {isConnected ? <CheckCircle2 /> : <Plug />}
-                    {isConnected ? "Desconectar Cuenta" : "Conectar Cuenta"}
+                    {isSyncingMeta ? (
+                      <Loader2 className="animate-spin" />
+                    ) : isConnected ? (
+                      <CheckCircle2 />
+                    ) : (
+                      <Plug />
+                    )}
+                    {isSyncingMeta
+                      ? "Verificando con Meta..."
+                      : "Verificar y Guardar IDs de Meta"}
                   </Button>
                 </CardFooter>
               </Card>

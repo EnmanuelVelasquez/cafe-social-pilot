@@ -277,11 +277,34 @@ export function classifyMetaGraphError(
   const { code, subcode, message, userMsg } = extractMetaErrorFields(rawError);
   const detailSuffix = userMsg ? ` Detalle: ${userMsg}` : "";
 
+  // 2500: Active access token must be used to query information about the current user
+  // Ocurre cuando se usa un App Token (Get App Token / app_id|secret) en vez de User/Page Token,
+  // o cuando un Page Token consulta un endpoint exclusivo de usuario sin page_id.
+  if (
+    code === 2500 ||
+    /active access token must be used to query information about the current user/i.test(
+      message,
+    )
+  ) {
+    return {
+      code: code ?? 2500,
+      subcode,
+      category: "PERMISSION_DENIED",
+      rawMessage: message,
+      userMessage:
+        "El token configurado en Meta no tiene contexto de Usuario ni de Página (código 2500: suele ocurrir cuando se genera un 'App Token' en lugar de un 'User/Page Access Token' en Graph API Explorer). En Graph API Explorer selecciona tu Página o Usuario y vuelve a generar el token, o configura el Page ID en Ajustes → Integraciones.",
+      retryable: false,
+      pauseIntegration: false,
+    };
+  }
+
   // 190: Access token has expired, been revoked, or is invalid -> PAUSA INMEDIATA
   if (
     code === 190 ||
     httpStatus === 401 ||
-    /error validating access token|session has expired|invalid oauth access token/i.test(message)
+    /error validating access token|session has expired|invalid oauth access token|malformed access token/i.test(
+      message,
+    )
   ) {
     return {
       code: code ?? 190,
@@ -667,20 +690,65 @@ async function parseGraphJsonOrThrow(
 }
 
 /**
+ * Limpia un token de Meta eliminando comillas envolventes, prefijo `Bearer `,
+ * asignaciones accidentales (`META_PAGE_ACCESS_TOKEN=...` o `access_token=...`) y saltos de línea.
+ */
+export function sanitizeMetaAccessToken(raw: string | null | undefined): string {
+  if (!raw) return "";
+  let cleaned = raw.trim();
+  if (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  if (/^bearer\s+/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^bearer\s+/i, "").trim();
+  }
+  if (/^META_PAGE_ACCESS_TOKEN=/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^META_PAGE_ACCESS_TOKEN=/i, "").trim();
+  }
+  const paramMatch = /(?:^|[?&])access_token=([^&\s]+)/i.exec(cleaned);
+  if (paramMatch?.[1]) {
+    try {
+      cleaned = decodeURIComponent(paramMatch[1]).trim();
+    } catch {
+      cleaned = paramMatch[1].trim();
+    }
+  }
+  return cleaned.replace(/[\r\n\s]+/g, "");
+}
+
+/**
  * Resuelve `page_id`, `page_access_token` e `ig_user_id`:
  * - Si ya están presentes en las columnas de `integraciones_sociales` (o variables de entorno), los usa directo.
- * - Si faltan, consulta `GET /me/accounts?fields=id,name,access_token,instagram_business_account`.
+ * - Si faltan, intenta primero `GET /me/accounts` (para User Access Tokens) y si el token ya es un
+ *   Page Access Token directo (donde `/me/accounts` falla o viene vacío), hace fallback automático a
+ *   `GET /me?fields=id,name,instagram_business_account` (o `GET /{pageId}`).
  */
 export async function resolveMetaAccountCredentials(
   input: ResolveMetaCredentialsInput,
 ): Promise<MetaResolvedCredentials> {
-  const token = input.accessToken.trim();
+  const token = sanitizeMetaAccessToken(input.accessToken);
   if (!token) {
     throw new MetaGraphApiError(
       classifyMetaGraphError({
         error: {
           code: 190,
           message: "No se encontró un token de acceso de Meta configurado.",
+        },
+      }),
+    );
+  }
+
+  // Un App Token con formato `app_id|app_secret` nunca puede publicar en nombre de una página
+  if (token.includes("|")) {
+    throw new MetaGraphApiError(
+      classifyMetaGraphError({
+        error: {
+          code: 2500,
+          message:
+            "An active access token must be used to query information about the current user.",
         },
       }),
     );
@@ -702,6 +770,40 @@ export async function resolveMetaAccountCredentials(
 
   const fetchImpl = input.fetchFn ?? fetch;
   const baseUrl = input.baseUrl ?? META_GRAPH_BASE_URL;
+
+  // Si ya tenemos cleanPageId y solo falta igUserId para Instagram, consultamos /{cleanPageId} directo
+  if (cleanPageId && input.network === "Instagram" && !cleanIgUserId) {
+    const pageUrl = new URL(`${baseUrl}/${encodeURIComponent(cleanPageId)}`);
+    pageUrl.searchParams.set("fields", "id,name,instagram_business_account");
+    pageUrl.searchParams.set("access_token", token);
+
+    let pageResp: Response;
+    try {
+      pageResp = await fetchImpl(pageUrl.toString(), { method: "GET" });
+    } catch (err) {
+      throw new MetaGraphApiError(classifyMetaGraphError(err));
+    }
+
+    if (pageResp.ok) {
+      const pageBody = await parseGraphJsonOrThrow(pageResp);
+      const igObj =
+        pageBody["instagram_business_account"] &&
+        typeof pageBody["instagram_business_account"] === "object"
+          ? (pageBody["instagram_business_account"] as Record<string, unknown>)
+          : undefined;
+      const igId =
+        typeof igObj?.["id"] === "string" ? igObj["id"].trim() : undefined;
+      if (igId) {
+        return {
+          pageId: cleanPageId,
+          pageAccessToken: token,
+          igUserId: igId,
+        };
+      }
+    }
+  }
+
+  // Intento 1: GET /me/accounts (funciona cuando el token es un User Access Token)
   const url = new URL(`${baseUrl}/me/accounts`);
   url.searchParams.set("fields", "id,name,access_token,instagram_business_account");
   url.searchParams.set("access_token", token);
@@ -713,18 +815,34 @@ export async function resolveMetaAccountCredentials(
     throw new MetaGraphApiError(classifyMetaGraphError(err));
   }
 
-  const body = await parseGraphJsonOrThrow(response);
-  const accounts = Array.isArray(body["data"])
-    ? (body["data"] as Array<Record<string, unknown>>)
-    : [];
+  let accounts: Array<Record<string, unknown>> = [];
+  let accountsError: MetaGraphApiError | null = null;
+
+  try {
+    const body = await parseGraphJsonOrThrow(response);
+    accounts = Array.isArray(body["data"])
+      ? (body["data"] as Array<Record<string, unknown>>)
+      : [];
+  } catch (err) {
+    if (err instanceof MetaGraphApiError) {
+      // Si el token está expirado/malformado (190), propagamos de inmediato
+      if (err.classified.category === "TOKEN_EXPIRED") {
+        throw err;
+      }
+      accountsError = err;
+    } else {
+      throw err;
+    }
+  }
 
   const matchedAccount = cleanPageId
     ? accounts.find((acc) => String(acc["id"] ?? "") === cleanPageId)
     : accounts[0];
 
   if (!matchedAccount) {
-    // Fallback: si el token ya es un Page Access Token directo (donde /me/accounts devuelve vacío),
-    // consultamos GET /me?fields=id,instagram_business_account
+    // Fallback: si el token ya es un Page Access Token directo (donde /me/accounts devuelve vacío
+    // o lanza error #100 / #2500 porque un nodo Page no tiene arista /accounts),
+    // consultamos GET /me?fields=id,name,instagram_business_account
     const meUrl = new URL(`${baseUrl}/me`);
     meUrl.searchParams.set("fields", "id,name,instagram_business_account");
     meUrl.searchParams.set("access_token", token);
@@ -733,7 +851,7 @@ export async function resolveMetaAccountCredentials(
     try {
       meResp = await fetchImpl(meUrl.toString(), { method: "GET" });
     } catch (err) {
-      throw new MetaGraphApiError(classifyMetaGraphError(err));
+      throw accountsError ?? new MetaGraphApiError(classifyMetaGraphError(err));
     }
 
     const meBody = await parseGraphJsonOrThrow(meResp);
@@ -748,14 +866,17 @@ export async function resolveMetaAccountCredentials(
       (typeof meIgObj?.["id"] === "string" ? meIgObj["id"].trim() : undefined);
 
     if (!meId) {
-      throw new MetaGraphApiError(
-        classifyMetaGraphError({
-          error: {
-            code: 200,
-            message:
-              "No se encontraron páginas de Facebook administradas por este token en /me/accounts.",
-          },
-        }),
+      throw (
+        accountsError ??
+        new MetaGraphApiError(
+          classifyMetaGraphError({
+            error: {
+              code: 200,
+              message:
+                "No se encontraron páginas de Facebook administradas por este token en /me/accounts.",
+            },
+          }),
+        )
       );
     }
 
@@ -765,7 +886,7 @@ export async function resolveMetaAccountCredentials(
           error: {
             code: 200,
             message:
-              "La página de Facebook no tiene una cuenta de Instagram Business vinculada.",
+              "La página de Facebook o el usuario actual no tiene una cuenta de Instagram Business vinculada. Si usaste un User Token, asegúrate de conceder 'pages_show_list' o usa directamente el Token de Página.",
           },
         }),
       );

@@ -14,6 +14,7 @@ import {
   publishToFacebookPage,
   publishToInstagramFeed,
   resolveMetaAccountCredentials,
+  sanitizeMetaAccessToken,
 } from "@/lib/publish";
 import type { PublishStatus } from "@/types";
 
@@ -53,6 +54,15 @@ function readServerEnv(
 ): string | undefined {
   if (envOverride && typeof envOverride[key] === "string" && envOverride[key]) {
     return (envOverride[key] as string).trim();
+  }
+  const globalEnv = (globalThis as Record<string, unknown>)["__env__"];
+  if (
+    globalEnv &&
+    typeof globalEnv === "object" &&
+    typeof (globalEnv as Record<string, unknown>)[key] === "string"
+  ) {
+    const val = ((globalEnv as Record<string, unknown>)[key] as string).trim();
+    if (val) return val;
   }
   if (typeof process !== "undefined" && process.env && typeof process.env[key] === "string") {
     const val = process.env[key]?.trim();
@@ -338,12 +348,14 @@ export async function publishPostOnServer(
   const metaIntegration =
     integrations.find((i) => i.plataforma === "Instagram_Graph_API") ?? integrations[0];
 
-  const envToken = readServerEnv("META_PAGE_ACCESS_TOKEN", envOverride);
-  const dbToken =
+  const rawEnvToken = readServerEnv("META_PAGE_ACCESS_TOKEN", envOverride);
+  const envToken = rawEnvToken ? sanitizeMetaAccessToken(rawEnvToken) : undefined;
+  const rawDbToken =
     metaIntegration?.token_cifrado &&
     !String(metaIntegration.token_cifrado).startsWith("token_")
-      ? metaIntegration.token_cifrado.trim()
+      ? metaIntegration.token_cifrado
       : undefined;
+  const dbToken = rawDbToken ? sanitizeMetaAccessToken(rawDbToken) : undefined;
 
   if (metaIntegration && isIntegrationTokenExpired(metaIntegration, now) && !envToken) {
     const expiredMsg =
@@ -364,7 +376,14 @@ export async function publishPostOnServer(
     };
   }
 
-  const accessToken = envToken ?? dbToken;
+  const useDbToken =
+    Boolean(dbToken) && (!metaIntegration || !isIntegrationTokenExpired(metaIntegration, now));
+  const accessToken = useDbToken ? dbToken : (envToken || dbToken);
+  const tokenSource = useDbToken
+    ? "integraciones_sociales"
+    : envToken
+      ? "META_PAGE_ACCESS_TOKEN"
+      : "ninguno";
   if (!accessToken) {
     const missingTokenMsg =
       "No hay un token de Meta configurado. Define el secret META_PAGE_ACCESS_TOKEN en el servidor o guarda un token real en integraciones_sociales.";
@@ -552,13 +571,19 @@ export async function publishPostOnServer(
       };
     }
 
+    const diagnosticSuffix =
+      classified.code === 2500 || classified.code === 190
+        ? ` [Fuente: ${tokenSource}, longitud: ${accessToken.length} caracteres${accessToken.includes("|") ? ", formato App Token '|'" : ""}]`
+        : "";
+    const finalErrorMessage = `${classified.userMessage}${diagnosticSuffix}`;
+
     await updatePostWithFallback(
       supabase,
       publicacionId,
       {
         estado: "error",
         intentos: retryDecision.nextAttempt,
-        ultimo_error: classified.userMessage,
+        ultimo_error: finalErrorMessage,
       },
       { estado: "error" },
     );
@@ -568,7 +593,7 @@ export async function publishPostOnServer(
       publicacionId,
       status: "error",
       attempts: retryDecision.nextAttempt,
-      errorMessage: classified.userMessage,
+      errorMessage: finalErrorMessage,
       pauseIntegration: retryDecision.pauseIntegration,
     };
   }
@@ -672,6 +697,114 @@ export const publishPostServerFn = createServerFn({ method: "POST" })
         publicacionId: data.publicacionId,
         status: "error",
         errorMessage: message,
+      };
+    }
+  });
+
+export interface SyncMetaIntegrationInput {
+  sucursalId: string;
+  pageId?: string | undefined;
+  igUserId?: string | undefined;
+}
+
+export interface SyncMetaIntegrationResult {
+  ok: boolean;
+  pageId?: string | null | undefined;
+  igUserId?: string | null | undefined;
+  errorMessage?: string | undefined;
+}
+
+/**
+ * Server Function para verificar el secret `META_PAGE_ACCESS_TOKEN` en el servidor,
+ * resolver o guardar `page_id` e `ig_user_id` en `integraciones_sociales` y reactivar la integración.
+ */
+export const syncMetaIntegrationServerFn = createServerFn({ method: "POST" })
+  .validator((data: SyncMetaIntegrationInput) => {
+    if (!data || typeof data.sucursalId !== "string" || !data.sucursalId.trim()) {
+      throw new Error("Se requiere un sucursalId válido.");
+    }
+    return {
+      sucursalId: data.sucursalId.trim(),
+      pageId: data.pageId?.trim() || undefined,
+      igUserId: data.igUserId?.trim() || undefined,
+    };
+  })
+  .handler(async ({ data }): Promise<SyncMetaIntegrationResult> => {
+    try {
+      const supabase = createServerSupabaseClient();
+      const existingRes = await supabase
+        .from("integraciones_sociales")
+        .select("*")
+        .eq("sucursal_id", data.sucursalId)
+        .maybeSingle();
+
+      const existing = existingRes.data as RawIntegrationRow | null;
+      const rawEnvToken = readServerEnv("META_PAGE_ACCESS_TOKEN");
+      const envToken = rawEnvToken ? sanitizeMetaAccessToken(rawEnvToken) : undefined;
+      const rawDbToken =
+        existing?.token_cifrado && !String(existing.token_cifrado).startsWith("token_")
+          ? existing.token_cifrado
+          : undefined;
+      const dbToken = rawDbToken ? sanitizeMetaAccessToken(rawDbToken) : undefined;
+      const accessToken = envToken ?? dbToken;
+
+      let resolvedPageId =
+        data.pageId ?? existing?.page_id ?? readServerEnv("META_PAGE_ID");
+      let resolvedIgUserId =
+        data.igUserId ?? existing?.ig_user_id ?? readServerEnv("META_IG_USER_ID");
+
+      if (accessToken && (!resolvedPageId || !resolvedIgUserId)) {
+        const creds = await resolveMetaAccountCredentials({
+          accessToken,
+          network: resolvedIgUserId ? "Facebook" : "Instagram",
+          pageId: resolvedPageId,
+          igUserId: resolvedIgUserId,
+        });
+        resolvedPageId = creds.pageId;
+        resolvedIgUserId = creds.igUserId ?? resolvedIgUserId;
+      }
+
+      if (!resolvedPageId && !accessToken) {
+        return {
+          ok: false,
+          errorMessage:
+            "No se encontró el secret META_PAGE_ACCESS_TOKEN en el servidor ni un Page ID manual.",
+        };
+      }
+
+      if (existing) {
+        await supabase
+          .from("integraciones_sociales")
+          .update({
+            page_id: resolvedPageId ?? null,
+            ig_user_id: resolvedIgUserId ?? null,
+            token_expira_en: null,
+          })
+          .eq("id", existing.id);
+      } else {
+        await supabase.from("integraciones_sociales").insert([
+          {
+            sucursal_id: data.sucursalId,
+            plataforma: "Instagram_Graph_API",
+            token_cifrado: null,
+            page_id: resolvedPageId ?? null,
+            ig_user_id: resolvedIgUserId ?? null,
+            token_expira_en: null,
+          },
+        ]);
+      }
+
+      return {
+        ok: true,
+        pageId: resolvedPageId ?? null,
+        igUserId: resolvedIgUserId ?? null,
+      };
+    } catch (err) {
+      const classified =
+        err instanceof MetaGraphApiError ? err.classified : classifyMetaGraphError(err);
+      return {
+        ok: false,
+        errorMessage: classified.userMessage,
       };
     }
   });
