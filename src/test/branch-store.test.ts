@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useBranchStore } from "@/lib/store";
+import { resolveNextBranchStateAfterDelete, useBranchStore } from "@/lib/store";
 import type { Sucursal } from "@/types";
 
 const sampleBranches: Sucursal[] = [
@@ -45,5 +45,32 @@ describe("useBranchStore", () => {
 
     useBranchStore.getState().setSucursalActiva(null);
     expect(useBranchStore.getState().sucursalActiva).toBeNull();
+  });
+
+  it("elimina la sucursal activa con removeSucursal y selecciona automáticamente la siguiente disponible", () => {
+    useBranchStore.getState().setSucursales(sampleBranches);
+    useBranchStore.getState().setSucursalActiva(sampleBranches[0]!);
+
+    useBranchStore.getState().removeSucursal("suc-1");
+
+    const stateAfterFirstDelete = useBranchStore.getState();
+    expect(stateAfterFirstDelete.sucursales).toEqual([sampleBranches[1]!]);
+    expect(stateAfterFirstDelete.sucursalActiva).toEqual(sampleBranches[1]!);
+
+    useBranchStore.getState().removeSucursal("suc-2");
+
+    const stateAfterAllDeleted = useBranchStore.getState();
+    expect(stateAfterAllDeleted.sucursales).toEqual([]);
+    expect(stateAfterAllDeleted.sucursalActiva).toBeNull();
+  });
+
+  it("mantiene la sucursal activa actual si se elimina otra sucursal distinta", () => {
+    const next = resolveNextBranchStateAfterDelete(
+      sampleBranches,
+      "suc-1",
+      sampleBranches[1]!,
+    );
+    expect(next.sucursales).toEqual([sampleBranches[1]!]);
+    expect(next.sucursalActiva).toEqual(sampleBranches[1]!);
   });
 });

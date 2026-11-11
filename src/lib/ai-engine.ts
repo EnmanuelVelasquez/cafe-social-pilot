@@ -1,8 +1,33 @@
-import { buildBrandSystemPrompt } from "@/lib/brand";
-import type { Asset } from "@/lib/data";
-import type { Sucursal } from "@/types";
+import { buildBrandSystemPrompt, normalizeBrandKit, type Pillar } from "@/lib/brand";
+import { inferTagsFromFilename, type Asset } from "@/lib/data";
+import type { BrandKit, Sucursal } from "@/types";
 
 export type AIPostType = "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY";
+export type AIProviderSource = "gemini" | "webhook";
+export type VisionTagSource = "gemini" | "webhook" | "filename_fallback";
+
+export const GEMINI_DEFAULT_MODEL = "gemini-3.8-flash";
+export const GEMINI_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+
+const RETIRED_GEMINI_MODELS = new Set([
+  "gemini-1.5-flash",
+  "gemini-2.0-flash",
+  "gemini-2.5-flash",
+]);
+
+/**
+ * Normaliza el identificador del modelo Gemini y actualiza automáticamente
+ * nombres de modelos retirados (ej. `gemini-2.5-flash`) a `gemini-3.8-flash`.
+ */
+export function resolveGeminiModel(rawModel?: string | undefined): string {
+  const cleaned = (rawModel ?? "")
+    .trim()
+    .replace(/^models\//i, "");
+  if (!cleaned || RETIRED_GEMINI_MODELS.has(cleaned.toLowerCase())) {
+    return GEMINI_DEFAULT_MODEL;
+  }
+  return cleaned;
+}
 
 /**
  * REQ-3.1: Contrato JSON estricto devuelto por el motor de IA.
@@ -19,8 +44,462 @@ export const MAX_JSON_RETRIES = 2;
 
 const VALID_POST_TYPES: readonly AIPostType[] = ["FEED_SINGLE", "FEED_CAROUSEL", "STORY"];
 
+/**
+ * Esquema JSON nativo para `generationConfig.responseSchema` en Gemini API,
+ * garantizando que el modelo responda en el primer intento con la estructura exacta de REQ-3.1.
+ */
+export const AI_POST_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    post_type: {
+      type: "STRING",
+      enum: ["FEED_SINGLE", "FEED_CAROUSEL", "STORY"],
+    },
+    copy_text: {
+      type: "STRING",
+    },
+    recommended_visual_tags: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+    },
+    call_to_action_used: {
+      type: "BOOLEAN",
+    },
+  },
+  required: [
+    "post_type",
+    "copy_text",
+    "recommended_visual_tags",
+    "call_to_action_used",
+  ],
+} as const;
+
+export const VISION_TAGS_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    tags: {
+      type: "ARRAY",
+      items: { type: "STRING" },
+    },
+  },
+  required: ["tags"],
+} as const;
+
+interface GeminiCandidatePart {
+  text?: unknown;
+  thought?: boolean | undefined;
+  inlineData?: { mimeType?: unknown; data?: unknown } | undefined;
+}
+
+/**
+ * Extrae el texto JSON final devuelto por Gemini ignorando partes internas de razonamiento (`thought: true`).
+ */
+export function extractGeminiResponseText(payload: {
+  candidates?: Array<{
+    content?: { parts?: GeminiCandidatePart[] };
+  }>;
+}): string | null {
+  const parts = payload.candidates?.[0]?.content?.parts;
+  if (!Array.isArray(parts) || parts.length === 0) return null;
+
+  const nonThoughtParts = parts.filter(
+    (part) => !part.thought && typeof part.text === "string" && part.text.trim().length > 0,
+  );
+  const selected =
+    nonThoughtParts[nonThoughtParts.length - 1] ??
+    parts.find((part) => typeof part.text === "string" && part.text.trim().length > 0);
+
+  return typeof selected?.text === "string" ? selected.text : null;
+}
+
+function buildGeminiThinkingConfig(model: string): { thinkingLevel: "LOW" } | undefined {
+  const resolved = resolveGeminiModel(model).toLowerCase();
+  if (resolved.startsWith("gemini-3")) {
+    return { thinkingLevel: "LOW" };
+  }
+  return undefined;
+}
+
+/**
+ * Error de transporte HTTP o cuota del proveedor (ej. 400/403 API Key inválida, 429 límite de cuota, 500).
+ * No debe reintentarse como si fuera una alucinación de formato JSON.
+ */
+export class AIProviderHttpError extends Error {
+  readonly status: number;
+  readonly code?: string | undefined;
+
+  constructor(message: string, status: number, code?: string | undefined) {
+    super(message);
+    this.name = "AIProviderHttpError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function buildGeminiEndpoint(model: string, apiKey: string): string {
+  const safeModel = encodeURIComponent(resolveGeminiModel(model));
+  const safeKey = encodeURIComponent(apiKey);
+  return `${GEMINI_API_BASE_URL}/${safeModel}:generateContent?key=${safeKey}`;
+}
+
+async function buildGeminiHttpError(
+  response: Response,
+  contextLabel: string,
+): Promise<AIProviderHttpError> {
+  let code: string | undefined;
+  let apiMessage: string | undefined;
+  try {
+    const errJson = (await response.json()) as {
+      error?: { status?: string; code?: number; message?: string };
+    };
+    code = errJson?.error?.status;
+    apiMessage = errJson?.error?.message;
+  } catch {
+    // Ignorar si el cuerpo de error no es JSON
+  }
+
+  if (response.status === 429) {
+    return new AIProviderHttpError(
+      `${contextLabel} respondió con estado 429 (límite de peticiones por minuto alcanzado en Gemini API)`,
+      429,
+      code ?? "RESOURCE_EXHAUSTED",
+    );
+  }
+
+  if (response.status === 400 || response.status === 401 || response.status === 403) {
+    const detail = apiMessage ? `: ${apiMessage}` : "";
+    return new AIProviderHttpError(
+      `${contextLabel} respondió con estado ${response.status} (verifica tu VITE_GEMINI_API_KEY)${detail}`,
+      response.status,
+      code,
+    );
+  }
+
+  const detail = apiMessage ? `: ${apiMessage}` : "";
+  return new AIProviderHttpError(
+    `${contextLabel} respondió con estado ${response.status}${detail}`,
+    response.status,
+    code,
+  );
+}
+
 function normalizeTag(tag: string): string {
   return tag.replace(/^#+/, "").trim().toLowerCase();
+}
+
+function normalizeHashtagToken(rawTag: string): string {
+  const clean = rawTag
+    .replace(/^#+/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-záéíóúñü0-9_]/gi, "");
+  return clean ? `#${clean}` : "";
+}
+
+function stripMarkdownCodeFence(text: string): string {
+  return text
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+}
+
+/**
+ * Extrae `mimeType` y `data` (base64 puro) a partir de un Data URL (`data:image/jpeg;base64,...`).
+ */
+export function extractInlineDataFromDataUrl(
+  dataUrl: string,
+): { mimeType: string; data: string } | null {
+  const match = /^data:([^;,]+);base64,(.+)$/s.exec(dataUrl.trim());
+  if (!match || !match[1] || !match[2]) return null;
+  return {
+    mimeType: match[1].trim(),
+    data: match[2].trim(),
+  };
+}
+
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i] ?? 0);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Resuelve un Data URL o una URL pública de imagen a `{ mimeType, data }` en base64
+ * para enviarlo en `inlineData` a Gemini Vision.
+ */
+export async function resolveImageToInlineData(
+  imageUrl: string,
+  fetchFn?: typeof fetch | undefined,
+): Promise<{ mimeType: string; data: string }> {
+  const fromDataUrl = extractInlineDataFromDataUrl(imageUrl);
+  if (fromDataUrl) {
+    return fromDataUrl;
+  }
+
+  const fetchImpl = fetchFn ?? fetch;
+  const response = await fetchImpl(imageUrl);
+  if (!response.ok) {
+    throw new Error(`No se pudo descargar la imagen para análisis visual (${response.status})`);
+  }
+
+  const contentType = response.headers?.get?.("content-type") || "image/jpeg";
+  const mimeType = contentType.split(";")[0]?.trim() || "image/jpeg";
+  const buffer = await response.arrayBuffer();
+  return {
+    mimeType,
+    data: arrayBufferToBase64(buffer),
+  };
+}
+
+/**
+ * REQ-2.2: Construye el prompt agnóstico al giro de negocio para que el modelo de visión
+ * analice un activo y devuelva etiquetas descriptivas en formato JSON estricto.
+ */
+export function buildVisionTaggingPrompt(branchName?: string): string {
+  const brandContext = branchName ? ` para la marca o sucursal "${branchName}"` : "";
+  return [
+    `Analiza visualmente esta imagen${brandContext}.`,
+    "Identifica los elementos visuales principales (producto, servicio, personas, equipo, instalaciones, ambiente, promoción, infografía o contexto visual).",
+    'Devuelve ÚNICAMENTE un objeto JSON válido con la propiedad "tags" que contenga entre 3 y 5 etiquetas descriptivas en español en minúsculas con prefijo #.',
+    'Incluye al menos una categoría funcional (#producto, #servicio, #ambiente, #comunidad, #educativo u #oferta) junto con etiquetas específicas de lo que aparece en la imagen (ej. {"tags": ["#producto", "#ambiente", "#detalle_visual"]}).',
+  ].join(" ");
+}
+
+/**
+ * REQ-2.2: Valida y normaliza la respuesta JSON del modelo de visión computacional
+ * garantizando una lista no vacía de hashtags en minúsculas.
+ */
+export function parseAndValidateVisionTagsResponse(raw: unknown): string[] {
+  let parsed: unknown = raw;
+
+  if (typeof raw === "string") {
+    const cleaned = stripMarkdownCodeFence(raw);
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch {
+      throw new Error("Respuesta de visión IA no es un JSON válido.");
+    }
+  }
+
+  let rawList: unknown;
+  if (Array.isArray(parsed)) {
+    rawList = parsed;
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    rawList = obj["tags"] ?? obj["visual_tags"] ?? obj["recommended_visual_tags"];
+  }
+
+  if (!Array.isArray(rawList) || rawList.length === 0) {
+    throw new Error("Respuesta de visión IA debe incluir un arreglo no vacío de etiquetas.");
+  }
+
+  const normalized = Array.from(
+    new Set(
+      rawList
+        .filter((item): item is string => typeof item === "string")
+        .map(normalizeHashtagToken)
+        .filter((tag) => tag.length > 1),
+    ),
+  ).slice(0, 6);
+
+  if (normalized.length === 0) {
+    throw new Error("Respuesta de visión IA no produjo etiquetas válidas.");
+  }
+
+  return normalized;
+}
+
+/**
+ * Convierte un archivo o Blob de imagen en un Data URL (base64) para enviarlo
+ * directamente a Gemini Vision (`gemini-2.5-flash`).
+ */
+export function fileToDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (typeof FileReader === "undefined") {
+      reject(new Error("FileReader no está disponible en este entorno."));
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+      } else {
+        reject(new Error("No se pudo codificar la imagen en base64."));
+      }
+    };
+    reader.onerror = () => reject(new Error("Error leyendo el archivo de imagen."));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * REQ-2.2: Invoca Google Gemini (`gemini-2.5-flash`) con capacidades de Visión para etiquetar una imagen.
+ */
+export async function callGeminiVisionForTags(params: {
+  imageUrl: string;
+  apiKey: string;
+  branchName?: string | undefined;
+  model?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}): Promise<string[]> {
+  const fetchImpl = params.fetchFn ?? fetch;
+  const model = params.model || GEMINI_DEFAULT_MODEL;
+  const inlineData = await resolveImageToInlineData(params.imageUrl, fetchImpl);
+  const endpoint = buildGeminiEndpoint(model, params.apiKey);
+  const thinkingConfig = buildGeminiThinkingConfig(model);
+
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [
+          {
+            text: "Eres un asistente experto en visión computacional y catalogación de activos digitales para marketing de marcas. Responde siempre con un objeto JSON válido.",
+          },
+        ],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: buildVisionTaggingPrompt(params.branchName) },
+            {
+              inlineData: {
+                mimeType: inlineData.mimeType,
+                data: inlineData.data,
+              },
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: VISION_TAGS_RESPONSE_SCHEMA,
+        temperature: 0.2,
+        ...(thinkingConfig ? { thinkingConfig } : {}),
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw await buildGeminiHttpError(response, "Gemini Vision");
+  }
+
+  const payload = (await response.json()) as {
+    candidates?: Array<{
+      content?: { parts?: GeminiCandidatePart[] };
+    }>;
+  };
+  const content = extractGeminiResponseText(payload);
+  if (!content) {
+    throw new Error("Gemini Vision devolvió una respuesta vacía.");
+  }
+
+  return parseAndValidateVisionTagsResponse(content);
+}
+
+/**
+ * REQ-2.2: Orquestador de auto-etiquetado visual para activos.
+ * Prioriza Google Gemini Vision (`gemini-2.5-flash`), luego Webhook IA.
+ * Cuando `allowFilenameFallback` es `true` (por defecto al subir un archivo nuevo),
+ * usa `inferTagsFromFilename` si la IA no está disponible para no abortar la subida a Supabase Storage;
+ * cuando es `false` (ej. botón "Sugerir con IA Vision"), exige que el proveedor IA responda.
+ */
+export async function analyzeAssetImageTags(options: {
+  imageUrl?: string | undefined;
+  filename: string;
+  branchName?: string | undefined;
+  apiKey?: string | undefined;
+  webhookUrl?: string | undefined;
+  model?: string | undefined;
+  allowFilenameFallback?: boolean | undefined;
+  fetchFn?: typeof fetch | undefined;
+}): Promise<{ tags: string[]; source: VisionTagSource }> {
+  const apiKey = (
+    options.apiKey ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
+    ""
+  ).trim();
+  const webhookUrl = (
+    options.webhookUrl ??
+    (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
+    ""
+  ).trim();
+  const model = resolveGeminiModel(
+    options.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
+  const allowFallback = options.allowFilenameFallback ?? true;
+  const fetchImpl = options.fetchFn ?? fetch;
+  const imageUrl = options.imageUrl?.trim();
+
+  if (!apiKey && !webhookUrl) {
+    if (!allowFallback) {
+      throw new Error(
+        "No hay proveedor de visión configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+      );
+    }
+    return {
+      tags: inferTagsFromFilename(options.filename),
+      source: "filename_fallback",
+    };
+  }
+
+  if (apiKey && imageUrl) {
+    try {
+      const tags = await callGeminiVisionForTags({
+        imageUrl,
+        apiKey,
+        branchName: options.branchName,
+        model,
+        fetchFn: fetchImpl,
+      });
+      return { tags, source: "gemini" };
+    } catch (err) {
+      if (!allowFallback && !webhookUrl) {
+        throw err;
+      }
+      console.warn("Fallo en auto-tagging con Gemini Vision:", err);
+    }
+  }
+
+  if (webhookUrl && imageUrl) {
+    try {
+      const response = await fetchImpl(webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "vision_tags",
+          image_url: imageUrl,
+          filename: options.filename,
+          branch_name: options.branchName,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(`Webhook Vision respondió con estado ${response.status}`);
+      }
+      const raw = await response.json();
+      const tags = parseAndValidateVisionTagsResponse(raw);
+      return { tags, source: "webhook" };
+    } catch (err) {
+      if (!allowFallback) {
+        throw err;
+      }
+      console.warn("Fallo en auto-tagging por Webhook:", err);
+    }
+  }
+
+  return {
+    tags: inferTagsFromFilename(options.filename),
+    source: "filename_fallback",
+  };
 }
 
 /**
@@ -30,11 +509,7 @@ export function parseAndValidateAIPostResponse(raw: unknown): AIPostResponse {
   let parsed: unknown = raw;
 
   if (typeof raw === "string") {
-    const cleaned = raw
-      .trim()
-      .replace(/^```(?:json)?\s*/i, "")
-      .replace(/\s*```$/i, "")
-      .trim();
+    const cleaned = stripMarkdownCodeFence(raw);
     try {
       parsed = JSON.parse(cleaned);
     } catch {
@@ -86,6 +561,8 @@ export function parseAndValidateAIPostResponse(raw: unknown): AIPostResponse {
 /**
  * Riesgo 2 (Alucinación JSON): Ejecuta el generador y reintenta hasta `maxRetries` veces
  * adicionales (por defecto 2) si la validación del JSON falla.
+ * Si el proveedor lanza un error HTTP de cuota/autenticación (`AIProviderHttpError`),
+ * propaga el error de inmediato sin reintentar inútilmente.
  */
 export async function generateWithRetry(
   providerCall: (attempt: number) => Promise<unknown>,
@@ -97,6 +574,9 @@ export async function generateWithRetry(
       const raw = await providerCall(attempt);
       return parseAndValidateAIPostResponse(raw);
     } catch (err) {
+      if (err instanceof AIProviderHttpError) {
+        throw err;
+      }
       lastError = err instanceof Error ? err : new Error(String(err));
     }
   }
@@ -154,77 +634,175 @@ export function resolveInitialPostStatus(
 }
 
 /**
- * Generador contextual determinista para la sucursal activa, respetando tono y tags disponibles.
+ * REQ-3.1: Construye el prompt de usuario agnóstico al tipo de industria con las etiquetas
+ * disponibles en el banco y la especificación estricta del contrato JSON.
  */
-export function buildContextualDraft(
-  branch: Pick<Sucursal, "nombre" | "tono" | "reglas_negativas">,
-  assets: Asset[],
-  variantIndex = 0,
-): AIPostResponse {
-  const bestUnusedFirst = [...assets].sort((a, b) => a.uses - b.uses);
-  const candidateAsset = bestUnusedFirst[variantIndex % Math.max(bestUnusedFirst.length, 1)];
-  const candidateTags =
-    candidateAsset && candidateAsset.tags.length > 0
-      ? candidateAsset.tags.map(normalizeTag).filter(Boolean)
-      : ["producto", "ambiente", "cafe"];
+export function buildPostGenerationUserPrompt(params: {
+  branchName: string;
+  availableTags: string[];
+  variantIndex?: number | undefined;
+}): string {
+  const normalizedTags = Array.from(
+    new Set(params.availableTags.map(normalizeTag).filter(Boolean)),
+  );
+  const tagsList =
+    normalizedTags.length > 0
+      ? normalizedTags.join(", ")
+      : "producto, servicio, ambiente, comunidad";
 
-  const primaryTag = candidateTags[0] || "cafe";
-  const tone = (branch.tono || "Cercano").toLowerCase();
-
-  let copyText: string;
-  if (tone.includes("profesional")) {
-    copyText = `En ${branch.nombre} cuidamos cada detalle de nuestra selección de origen para ofrecerte una experiencia consistente en cada taza. Visítanos hoy y descubre nuestra propuesta. ☕✨ #${branch.nombre.replace(/\s+/g, "")} #CafeDeEspecialidad #${primaryTag}`;
-  } else if (tone.includes("divertido")) {
-    copyText = `Tu día pide a gritos una pausa en ${branch.nombre} ☕😄 Ven por tu taza favorita y recarga energía de la buena. ¡Te esperamos hoy! 👇 #${branch.nombre.replace(/\s+/g, "")} #PlanDeCafe #${primaryTag}`;
-  } else if (tone.includes("inspirador")) {
-    copyText = `Cada gran historia comienza alrededor de una buena taza en ${branch.nombre}. Regálate un momento para conectar con lo que te inspira. 🌱☕ #${branch.nombre.replace(/\s+/g, "")} #MomentosDeOrigen #${primaryTag}`;
-  } else {
-    copyText = `¡El aroma recién preparado ya se siente en ${branch.nombre}! ☕💛 Pasa hoy por tu mesa favorita y disfruta una taza preparada con dedicación. #${branch.nombre.replace(/\s+/g, "")} #CafeColombiano #${primaryTag}`;
-  }
-
-  return {
-    post_type: "FEED_SINGLE",
-    copy_text: copyText,
-    recommended_visual_tags: candidateTags.slice(0, 3),
-    call_to_action_used: true,
-  };
+  return [
+    `Redacta una nueva publicación para redes sociales de la marca/sucursal "${params.branchName}" (variante #${(params.variantIndex ?? 0) + 1}).`,
+    `Etiquetas visuales disponibles actualmente en la biblioteca de activos: [${tagsList}].`,
+    "Adapta el mensaje a la identidad de la marca, su tono de comunicación y el contexto que sugieren sus etiquetas visuales disponibles, sin asumir un giro de negocio ajeno a sus datos.",
+    "Devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:",
+    '{ "post_type": "FEED_SINGLE" | "FEED_CAROUSEL" | "STORY", "copy_text": "<texto persuasivo en español con emojis y hashtags acordes a la marca>", "recommended_visual_tags": ["<etiqueta_1>", "<etiqueta_2>"], "call_to_action_used": true }',
+    "Elige en `recommended_visual_tags` de 1 a 3 etiquetas que coincidan con las disponibles en la biblioteca y respeta estrictamente las reglas negativas del sistema.",
+  ].join(" ");
 }
 
 /**
- * Orquestador híbrido del Motor IA (REQ-3.1 + REQ-3.2 + Riesgo 2):
- * Si existe `VITE_AI_WEBHOOK_URL`, invoca el webhook con el prompt de sistema (incluyendo REQ-1.2);
- * de lo contrario utiliza el generador contextual determinista validado con `generateWithRetry`.
+ * REQ-3.1: Invoca Google Gemini (`gemini-2.5-flash`) para generar el JSON de la publicación.
+ */
+export async function callGeminiForPost(params: {
+  systemPrompt: string;
+  userPrompt: string;
+  apiKey: string;
+  model?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}): Promise<unknown> {
+  const fetchImpl = params.fetchFn ?? fetch;
+  const model = params.model || GEMINI_DEFAULT_MODEL;
+  const endpoint = buildGeminiEndpoint(model, params.apiKey);
+  const thinkingConfig = buildGeminiThinkingConfig(model);
+
+  const response = await fetchImpl(endpoint, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: params.systemPrompt }],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: params.userPrompt }],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: AI_POST_RESPONSE_SCHEMA,
+        temperature: 0.7,
+        ...(thinkingConfig ? { thinkingConfig } : {}),
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    throw await buildGeminiHttpError(response, "Gemini API");
+  }
+
+  const payload = (await response.json()) as {
+    candidates?: Array<{
+      content?: { parts?: GeminiCandidatePart[] };
+    }>;
+  };
+  const content = extractGeminiResponseText(payload);
+  if (!content) {
+    throw new Error("Gemini API devolvió una respuesta vacía.");
+  }
+
+  return content;
+}
+
+export interface GeneratePostOptions {
+  apiKey?: string | undefined;
+  webhookUrl?: string | undefined;
+  model?: string | undefined;
+  pillars?: Pillar[] | undefined;
+  fetchFn?: typeof fetch | undefined;
+}
+
+/**
+ * Orquestador del Motor IA (REQ-1.2 + REQ-3.1 + REQ-3.2 + Riesgo 2):
+ * Exige un proveedor IA real (`VITE_GEMINI_API_KEY` o `VITE_AI_WEBHOOK_URL`),
+ * valida el contrato JSON con hasta 2 reintentos y cruza el activo óptimo.
  */
 export async function generateSocialPostForBranch(
   branch: Pick<Sucursal, "id" | "nombre" | "tono" | "reglas_negativas">,
   assets: Asset[],
   variantIndex = 0,
-): Promise<{ aiResponse: AIPostResponse; matchedAsset: Asset; systemPrompt: string }> {
+  options?: GeneratePostOptions,
+): Promise<{
+  aiResponse: AIPostResponse;
+  matchedAsset: Asset;
+  systemPrompt: string;
+  provider: AIProviderSource;
+}> {
   if (assets.length === 0) {
     throw new Error("Banco de Contenido Agotado: No hay activos disponibles en esta sucursal.");
   }
 
-  const systemPrompt = buildBrandSystemPrompt(branch);
-  const webhookUrl = import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined;
+  const apiKey = (
+    options?.apiKey ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
+    ""
+  ).trim();
+  const webhookUrl = (
+    options?.webhookUrl ??
+    (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
+    ""
+  ).trim();
+  const model = resolveGeminiModel(
+    options?.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
+  const fetchImpl = options?.fetchFn ?? fetch;
+
+  if (!apiKey && !webhookUrl) {
+    throw new Error(
+      "No hay un proveedor de IA configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+    );
+  }
+
+  const systemPrompt = buildBrandSystemPrompt(branch, options?.pillars);
+  const availableTags = Array.from(new Set(assets.flatMap((a) => a.tags)));
+  const userPrompt = buildPostGenerationUserPrompt({
+    branchName: branch.nombre,
+    availableTags,
+    variantIndex,
+  });
+
+  const provider: AIProviderSource = apiKey ? "gemini" : "webhook";
 
   const aiResponse = await generateWithRetry(async () => {
-    if (webhookUrl) {
-      const response = await fetch(webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sucursal_id: branch.id,
-          system_prompt: systemPrompt,
-          available_tags: Array.from(new Set(assets.flatMap((a) => a.tags))),
-        }),
+    if (apiKey) {
+      return callGeminiForPost({
+        systemPrompt,
+        userPrompt,
+        apiKey,
+        model,
+        fetchFn: fetchImpl,
       });
-      if (!response.ok) {
-        throw new Error(`Webhook respondió con estado ${response.status}`);
-      }
-      return response.json();
     }
 
-    return buildContextualDraft(branch, assets, variantIndex);
+    const response = await fetchImpl(webhookUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sucursal_id: branch.id,
+        system_prompt: systemPrompt,
+        user_prompt: userPrompt,
+        available_tags: availableTags,
+      }),
+    });
+    if (!response.ok) {
+      throw new AIProviderHttpError(
+        `Webhook respondió con estado ${response.status}`,
+        response.status,
+      );
+    }
+    return response.json();
   });
 
   const matchedAsset = selectBestMatchingAsset(assets, aiResponse.recommended_visual_tags);
@@ -232,5 +810,661 @@ export async function generateSocialPostForBranch(
     throw new Error("Banco de Contenido Agotado: No se encontró un activo válido.");
   }
 
-  return { aiResponse, matchedAsset, systemPrompt };
+  return { aiResponse, matchedAsset, systemPrompt, provider };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Generador Semanal de Imágenes con IA (Google Gemini / Imagen API)
+ *
+ * Regla de negocio: el lote semanal se reparte siempre con la mezcla de
+ * pilares 40% Venta / 30% Educativo / 30% Estilo de vida, salvo que la marca
+ * configure otra distribución. Todo el texto que se envía al modelo se
+ * construye desde la sucursal activa, nunca con supuestos de giro de negocio.
+ * ------------------------------------------------------------------------- */
+
+export type WeeklyContentPillar = "VENTA" | "EDUCATIVO" | "ESTILO_DE_VIDA";
+export type WeeklyImageAspectRatio = "1:1" | "4:5" | "9:16";
+
+export const WEEKLY_CONTENT_PILLARS: readonly WeeklyContentPillar[] = [
+  "VENTA",
+  "EDUCATIVO",
+  "ESTILO_DE_VIDA",
+];
+
+/** Regla de pilares del pack semanal: 40% Venta, 30% Educativo, 30% Estilo de vida. */
+export const WEEKLY_PILLAR_SHARES: Record<WeeklyContentPillar, number> = {
+  VENTA: 40,
+  EDUCATIVO: 30,
+  ESTILO_DE_VIDA: 30,
+};
+
+export const WEEKLY_PILLAR_LABELS: Record<WeeklyContentPillar, string> = {
+  VENTA: "Venta / Producto",
+  EDUCATIVO: "Educativo",
+  ESTILO_DE_VIDA: "Estilo de vida / Comunidad",
+};
+
+export const WEEKLY_PILLAR_HASHTAGS: Record<WeeklyContentPillar, string> = {
+  VENTA: "#venta",
+  EDUCATIVO: "#educativo",
+  ESTILO_DE_VIDA: "#estilo_de_vida",
+};
+
+/** Proporciones de imagen compatibles con Meta Graph API (REQ-2.1). */
+export const WEEKLY_IMAGE_ASPECT_RATIOS: readonly WeeklyImageAspectRatio[] = [
+  "1:1",
+  "4:5",
+  "9:16",
+];
+
+export const WEEKLY_IMAGE_ASPECT_RATIO_LABELS: Record<WeeklyImageAspectRatio, string> = {
+  "1:1": "Feed cuadrado (1:1)",
+  "4:5": "Feed vertical (4:5)",
+  "9:16": "Stories / Reels (9:16)",
+};
+
+export const DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO: WeeklyImageAspectRatio = "4:5";
+export const MIN_WEEKLY_IMAGE_COUNT = 1;
+export const MAX_WEEKLY_IMAGE_COUNT = 5;
+export const DEFAULT_WEEKLY_IMAGE_COUNT = 3;
+
+/**
+ * Acota la cantidad de imágenes del lote al rango soportado (1 a 5).
+ * Un valor inválido cae en `DEFAULT_WEEKLY_IMAGE_COUNT`.
+ */
+export function normalizeWeeklyImageCount(rawCount?: number | undefined): number {
+  if (typeof rawCount !== "number" || !Number.isFinite(rawCount)) {
+    return DEFAULT_WEEKLY_IMAGE_COUNT;
+  }
+  return Math.min(MAX_WEEKLY_IMAGE_COUNT, Math.max(MIN_WEEKLY_IMAGE_COUNT, Math.round(rawCount)));
+}
+
+/** Garantiza una relación de aspecto aceptada por la API (1:1, 4:5 o 9:16). */
+export function resolveWeeklyImageAspectRatio(
+  raw?: string | undefined,
+): WeeklyImageAspectRatio {
+  const cleaned = (raw ?? "").trim();
+  const found = WEEKLY_IMAGE_ASPECT_RATIOS.find((ratio) => ratio === cleaned);
+  return found ?? DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO;
+}
+
+export interface WeeklyBatchPlanItem {
+  index: number;
+  pillar: WeeklyContentPillar;
+  label: string;
+  hashtag: string;
+  sharePercent: number;
+  aspectRatio: WeeklyImageAspectRatio;
+}
+
+/**
+ * Planifica el lote semanal repartiendo `count` imágenes entre los pilares según
+ * sus porcentajes (por defecto 40/30/30). Usa el método del mayor residuo para
+ * no perder ni duplicar piezas y alterna los pilares para no agrupar el mismo
+ * tema en días consecutivos.
+ */
+export function calculateWeeklyBatchPlan(params: {
+  count: number;
+  shares?: Partial<Record<WeeklyContentPillar, number>> | undefined;
+  aspectRatio?: string | undefined;
+}): WeeklyBatchPlanItem[] {
+  const total = normalizeWeeklyImageCount(params.count);
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+
+  const weights = WEEKLY_CONTENT_PILLARS.map((pillar) => {
+    const raw = params.shares?.[pillar];
+    const value =
+      typeof raw === "number" && Number.isFinite(raw)
+        ? Math.max(0, raw)
+        : WEEKLY_PILLAR_SHARES[pillar];
+    return { pillar, value };
+  });
+
+  let weightTotal = weights.reduce((acc, w) => acc + w.value, 0);
+  if (weightTotal <= 0) {
+    for (const weight of weights) weight.value = 1;
+    weightTotal = weights.length;
+  }
+
+  const exactCounts = weights.map((w) => (w.value / weightTotal) * total);
+  const counts = exactCounts.map((value) => Math.floor(value));
+  let pending = total - counts.reduce((a, b) => a + b, 0);
+
+  const byRemainder = exactCounts
+    .map((value, index) => ({ index, fraction: value - Math.floor(value) }))
+    .sort((a, b) => b.fraction - a.fraction || a.index - b.index);
+
+  for (const { index } of byRemainder) {
+    if (pending <= 0) break;
+    counts[index] = (counts[index] ?? 0) + 1;
+    pending -= 1;
+  }
+
+  const remainingByPillar = new Map<WeeklyContentPillar, number>();
+  WEEKLY_CONTENT_PILLARS.forEach((pillar, index) => {
+    remainingByPillar.set(pillar, counts[index] ?? 0);
+  });
+
+  const plan: WeeklyBatchPlanItem[] = [];
+  for (let index = 0; index < total; index++) {
+    let chosen: WeeklyContentPillar | null = null;
+    let bestRemaining = 0;
+    for (const pillar of WEEKLY_CONTENT_PILLARS) {
+      const left = remainingByPillar.get(pillar) ?? 0;
+      if (left > bestRemaining) {
+        bestRemaining = left;
+        chosen = pillar;
+      }
+    }
+    if (!chosen) break;
+
+    remainingByPillar.set(chosen, bestRemaining - 1);
+    const weight = weights.find((w) => w.pillar === chosen)?.value ?? 0;
+
+    plan.push({
+      index,
+      pillar: chosen,
+      label: WEEKLY_PILLAR_LABELS[chosen],
+      hashtag: WEEKLY_PILLAR_HASHTAGS[chosen],
+      sharePercent: Math.round((weight / weightTotal) * 1000) / 10,
+      aspectRatio,
+    });
+  }
+
+  return plan;
+}
+
+const TONE_VISUAL_GUIDES: ReadonlyArray<{ pattern: RegExp; guide: string }> = [
+  {
+    pattern: /cercan|amable|c[áa]lid|humano|emp[áa]tic/i,
+    guide:
+      "luz natural cálida, personas reales con expresiones espontáneas, planos cercanos y una atmósfera acogedora",
+  },
+  {
+    pattern: /profesional|corporativ|formal|institucional/i,
+    guide:
+      "composición limpia y minimalista, iluminación de estudio suave, profundidad de campo controlada y paleta sobria",
+  },
+  {
+    pattern: /divertid|alegre|juvenil|energ[ée]tic/i,
+    guide:
+      "colores vivos, movimiento y energía, ángulos dinámicos y situaciones alegres y desenfadadas",
+  },
+  {
+    pattern: /inspirador|aspiracional|premium|elegante|lujo/i,
+    guide:
+      "estética editorial aspiracional, luz cinematográfica, texturas ricas y acabado premium",
+  },
+  {
+    pattern: /modern|vanguard|tecno|minimal/i,
+    guide:
+      "geometrías limpias, alto contraste, sombras nítidas y estética contemporánea de editorial",
+  },
+];
+
+const DEFAULT_TONE_VISUAL_GUIDE =
+  "fotografía comercial luminosa, composición equilibrada, colores fieles a la marca y acabado profesional";
+
+/** Traduce el tono de voz de la marca en una guía de estilo fotográfico. */
+export function describeToneVisualStyle(tone?: string | undefined): string {
+  const cleaned = (tone ?? "").trim();
+  if (!cleaned) return DEFAULT_TONE_VISUAL_GUIDE;
+  const match = TONE_VISUAL_GUIDES.find((entry) => entry.pattern.test(cleaned));
+  return match?.guide ?? DEFAULT_TONE_VISUAL_GUIDE;
+}
+
+/** Objetivo narrativo de cada pilar de contenido, sin asumir un giro de negocio. */
+export function describeWeeklyPillarObjective(pillar: WeeklyContentPillar): string {
+  switch (pillar) {
+    case "VENTA":
+      return "objetivo comercial: el producto o servicio es el protagonista absoluto, mostrado en primer plano con detalle de textura, calidad y acabado";
+    case "EDUCATIVO":
+      return "objetivo educativo: ilustra un proceso, un detrás de cámaras o un detalle técnico que enseñe algo útil a la audiencia";
+    case "ESTILO_DE_VIDA":
+      return "objetivo de comunidad: escena de uso real donde personas disfrutan la experiencia de la marca en su día a día";
+    default:
+      return "objetivo de marca: escena versátil que represente la propuesta de valor del negocio";
+  }
+}
+
+export interface WeeklyBatchSummaryItem {
+  pillar: WeeklyContentPillar;
+  label: string;
+  sharePercent: number;
+  count: number;
+}
+
+/**
+ * Resumen deduplicado del lote para la UI: cuántas piezas aporta cada pilar y
+ * con qué peso dentro del total (sin repetir la misma fila por cada imagen).
+ */
+export function summarizeWeeklyBatchPlan(
+  plan: WeeklyBatchPlanItem[],
+): WeeklyBatchSummaryItem[] {
+  const byPillar = new Map<WeeklyContentPillar, WeeklyBatchSummaryItem>();
+  for (const item of plan) {
+    const current = byPillar.get(item.pillar);
+    if (current) {
+      current.count += 1;
+    } else {
+      byPillar.set(item.pillar, {
+        pillar: item.pillar,
+        label: item.label,
+        sharePercent: item.sharePercent,
+        count: 1,
+      });
+    }
+  }
+  return Array.from(byPillar.values());
+}
+
+/* ------------------------------------------------------------------------- *
+ * Generador Semanal de Prompts Visuales con IA (gemini-3.8-flash)
+ *
+ * Regla de negocio: en lugar de gastar cuota generando imágenes, el motor
+ * produce prompts fotográficos en INGLÉS listos para copiar en ImageFX,
+ * Midjourney o DALL·E, más una explicación en español y etiquetas sugeridas.
+ * El lote respeta la mezcla 40/30/30 y el Brand Kit de la sucursal.
+ * ------------------------------------------------------------------------- */
+
+/** Etiquetas exactas que devuelve el modelo en `pilar`. */
+export const WEEKLY_PROMPT_PILLAR_LABELS = WEEKLY_CONTENT_PILLARS.map(
+  (pillar) => WEEKLY_PILLAR_LABELS[pillar],
+);
+
+export const WEEKLY_IMAGE_PROMPTS_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    prompts: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          pilar: {
+            type: "STRING",
+            enum: WEEKLY_PROMPT_PILLAR_LABELS,
+          },
+          idea_espanol: { type: "STRING" },
+          prompt_ingles: { type: "STRING" },
+          suggested_tags: {
+            type: "ARRAY",
+            items: { type: "STRING" },
+          },
+        },
+        required: ["pilar", "idea_espanol", "prompt_ingles", "suggested_tags"],
+      },
+    },
+  },
+  required: ["prompts"],
+} as const;
+
+export interface WeeklyVisualPromptItem {
+  pillar: WeeklyContentPillar;
+  pillarLabel: string;
+  idea_espanol: string;
+  prompt_ingles: string;
+  suggested_tags: string[];
+}
+
+function normalizeLookupToken(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+const PILLAR_BY_LOOKUP: ReadonlyMap<string, WeeklyContentPillar> = new Map(
+  WEEKLY_CONTENT_PILLARS.flatMap((pillar) => [
+    [normalizeLookupToken(pillar), pillar] as const,
+    [normalizeLookupToken(WEEKLY_PILLAR_LABELS[pillar]), pillar] as const,
+  ]),
+);
+
+function normalizeSuggestedTags(raw: unknown, pillar: WeeklyContentPillar): string[] {
+  const list = Array.isArray(raw) ? raw : typeof raw === "string" ? raw.split(",") : [];
+  const normalized = list
+    .map((tag) => String(tag).replace(/^#+/, "").trim().toLowerCase())
+    .filter(Boolean);
+
+  const unique = Array.from(new Set(normalized)).slice(0, 5);
+  if (unique.length > 0) return unique;
+
+  return [WEEKLY_PILLAR_HASHTAGS[pillar].replace(/^#+/, "")];
+}
+
+/**
+ * Valida la respuesta JSON del modelo y la convierte en piezas tipadas.
+ * Acepta el JSON envuelto en un bloque markdown, igual que el resto del motor.
+ */
+export function parseAndValidateWeeklyPromptsResponse(
+  raw: unknown,
+): WeeklyVisualPromptItem[] {
+  let parsed: unknown = raw;
+
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(stripMarkdownCodeFence(raw));
+    } catch {
+      throw new Error("Respuesta de IA no es un JSON válido.");
+    }
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("La respuesta de prompts debe ser un objeto JSON.");
+  }
+
+  const prompts = (parsed as { prompts?: unknown }).prompts;
+  if (!Array.isArray(prompts) || prompts.length === 0) {
+    throw new Error("La respuesta de prompts debe incluir una lista no vacía en 'prompts'.");
+  }
+
+  return prompts.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new Error(`La pieza #${index + 1} de prompts no es un objeto válido.`);
+    }
+
+    const record = item as Record<string, unknown>;
+    const rawPillar = record["pilar"];
+    const idea = record["idea_espanol"];
+    const prompt = record["prompt_ingles"];
+
+    const pillar =
+      typeof rawPillar === "string"
+        ? PILLAR_BY_LOOKUP.get(normalizeLookupToken(rawPillar))
+        : undefined;
+
+    if (!pillar) {
+      throw new Error(`La pieza #${index + 1} tiene un pilar inválido o ausente.`);
+    }
+    if (typeof idea !== "string" || idea.trim().length === 0) {
+      throw new Error(`La pieza #${index + 1} no incluye 'idea_espanol'.`);
+    }
+    if (typeof prompt !== "string" || prompt.trim().length === 0) {
+      throw new Error(`La pieza #${index + 1} no incluye 'prompt_ingles'.`);
+    }
+
+    return {
+      pillar,
+      pillarLabel: WEEKLY_PILLAR_LABELS[pillar],
+      idea_espanol: idea.trim(),
+      prompt_ingles: prompt.trim(),
+      suggested_tags: normalizeSuggestedTags(record["suggested_tags"], pillar),
+    };
+  });
+}
+
+export interface WeeklyPromptsBranchInput {
+  nombre: string;
+  tono?: string | undefined;
+  reglas_negativas?: string | undefined;
+  brand_kit?: BrandKit | null | undefined;
+}
+
+export interface WeeklyVisualPromptsRequestParams {
+  branch: WeeklyPromptsBranchInput;
+  count: number;
+  aspectRatio?: string | undefined;
+  campaignContext?: string | undefined;
+  /** Cuántas imágenes de referencia se adjuntarán al modelo (máx. 2). */
+  referenceCount?: number | undefined;
+}
+
+export interface WeeklyVisualPromptsRequest {
+  systemPrompt: string;
+  userPrompt: string;
+  plan: WeeklyBatchPlanItem[];
+  brandKit: BrandKit;
+  aspectRatio: WeeklyImageAspectRatio;
+}
+
+/**
+ * Construye el prompt de sistema y de usuario para el generador de prompts
+ * visuales. Es una función pura: no hace red ni lee variables de entorno.
+ */
+export function buildWeeklyVisualPromptsRequest(
+  params: WeeklyVisualPromptsRequestParams,
+): WeeklyVisualPromptsRequest {
+  const plan = calculateWeeklyBatchPlan({
+    count: params.count,
+    aspectRatio: params.aspectRatio,
+  });
+  const aspectRatio = resolveWeeklyImageAspectRatio(params.aspectRatio);
+  const brandKit = normalizeBrandKit(params.branch.brand_kit);
+  const branchName = params.branch.nombre.trim() || "la marca";
+  const tone = params.branch.tono?.trim() || "Cercano";
+  const negativeRules = params.branch.reglas_negativas?.trim();
+  const campaign = params.campaignContext?.trim();
+  const referenceCount = Math.min(2, Math.max(0, Math.trunc(params.referenceCount ?? 0)));
+
+  const palette = [
+    brandKit.primary_color ? `primary ${brandKit.primary_color}` : "",
+    brandKit.secondary_color ? `secondary ${brandKit.secondary_color}` : "",
+    brandKit.accent_color ? `accent ${brandKit.accent_color}` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const systemPrompt = [
+    `Eres un director de arte senior especializado en fotografía publicitaria para redes sociales. Trabajas para la marca "${branchName}".`,
+    `Tono de comunicación obligatorio: ${tone}.`,
+    `Guía de estilo fotográfico derivada del tono: ${describeToneVisualStyle(tone)}.`,
+    palette ? `Paleta de marca obligatoria: ${palette}.` : "",
+    brandKit.visual_style ? `Estilo visual declarado por la marca: ${brandKit.visual_style}.` : "",
+    brandKit.reserve_logo_space
+      ? "Todas las composiciones deben dejar una zona limpia y despejada para superponer el logo de la marca."
+      : "",
+    negativeRules
+      ? `Reglas negativas de la marca (tradúcelas al inglés dentro del prompt visual): [${negativeRules}].`
+      : "",
+    "Nunca asumas el giro de negocio, el producto ni el sector de la marca: trabaja solo con los datos recibidos.",
+    "Cada pieza del lote debe ser visualmente distinta de las demás (encuadre, ángulo, momento y luz), manteniendo coherencia de marca.",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const planLines = plan.map(
+    (item, index) =>
+      `${index + 1}. Pilar: ${item.label} — objetivo: ${describeWeeklyPillarObjective(item.pillar)}.`,
+  );
+
+  const userPrompt = [
+    `Genera exactamente ${plan.length} ${plan.length === 1 ? "idea" : "ideas"} de prompts visuales para un lote semanal de la marca "${branchName}".`,
+    `Formato de todas las piezas: ${aspectRatio}.`,
+    campaign ? `Campaña o contexto de la semana: ${campaign}.` : "",
+    referenceCount > 0
+      ? `Se adjuntan ${referenceCount} ${referenceCount === 1 ? "imagen de referencia" : "imágenes de referencia"} de la marca: úsalas solo para respetar paleta, iluminación y estilo, sin copiar su composición literal.`
+      : "",
+    "Plan de pilares del lote:",
+    ...planLines,
+    'Devuelve ÚNICAMENTE un JSON válido con la forma { "prompts": [ { "pilar": "...", "idea_espanol": "...", "prompt_ingles": "...", "suggested_tags": ["..."] } ] }.',
+    `El campo "pilar" debe ser exactamente uno de: ${WEEKLY_PROMPT_PILLAR_LABELS.join(" | ")}.`,
+    'El campo "idea_espanol" debe explicar en 1 o 2 líneas el objetivo visual de la pieza, en español.',
+    `El campo "prompt_ingles" debe estar 100% en inglés, listo para copiar en ImageFX, Midjourney o DALL·E: incluye "aspect ratio ${aspectRatio}", la paleta de marca en hexadecimal, el estilo visual, iluminación, composición y tipo de plano.`,
+    brandKit.reserve_logo_space
+      ? 'Si la marca reserva espacio para el logo, incluye literalmente la frase "clean uncluttered negative space in the corner for brand logo overlay".'
+      : "",
+    'Termina cada "prompt_ingles" con una cláusula "Avoid:" que traduzca al inglés las reglas negativas de la marca y añada siempre "no deformed text, no gibberish letters, no watermarks".',
+    'El campo "suggested_tags" debe contener de 3 a 5 etiquetas en español, en minúsculas y sin el símbolo #, listas para asignarse a un activo.',
+    "No incluyas texto legible dentro de la imagen ni logotipos inventados.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  return { systemPrompt, userPrompt, plan, brandKit, aspectRatio };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fetchImageAsInlineData(
+  url: string,
+  fetchImpl: typeof fetch,
+): Promise<{ mimeType: string; data: string } | null> {
+  try {
+    const response = await fetchImpl(url);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+    const mimeType =
+      typeof blob.type === "string" && blob.type.startsWith("image/")
+        ? blob.type
+        : "image/jpeg";
+    const buffer = await blob.arrayBuffer();
+    return { mimeType, data: bytesToBase64(new Uint8Array(buffer)) };
+  } catch {
+    // Fallback silencioso: una referencia rota no debe abortar la generación.
+    return null;
+  }
+}
+
+/**
+ * Reintenta la llamada al proveedor mientras la validación del JSON falle.
+ * Los errores HTTP de cuota/autenticación se propagan de inmediato.
+ */
+export async function retryUntilValid<T>(
+  providerCall: (attempt: number) => Promise<unknown>,
+  validate: (raw: unknown) => T,
+  maxRetries = MAX_JSON_RETRIES,
+): Promise<T> {
+  let lastError: Error = new Error("Fallo en generación de IA");
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const raw = await providerCall(attempt);
+      return validate(raw);
+    } catch (err) {
+      if (err instanceof AIProviderHttpError) {
+        throw err;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
+  }
+  throw new Error(
+    `Generación abortada tras ${maxRetries + 1} intentos por JSON inválido: ${lastError.message}`,
+  );
+}
+
+export interface GenerateWeeklyPromptsParams {
+  branch: WeeklyPromptsBranchInput;
+  count: number;
+  aspectRatio?: string | undefined;
+  campaignContext?: string | undefined;
+  referenceImageUrls?: string[] | undefined;
+  apiKey?: string | undefined;
+  model?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}
+
+export interface GeneratedWeeklyPrompts {
+  provider: "gemini";
+  model: string;
+  aspectRatio: WeeklyImageAspectRatio;
+  items: WeeklyVisualPromptItem[];
+  plan: WeeklyBatchPlanItem[];
+  referenceImagesUsed: number;
+}
+
+/**
+ * Genera el lote semanal de prompts visuales con `gemini-3.8-flash`.
+ * Adjunta hasta 2 imágenes de marca (`brand_logo` / `brand_reference`) y
+ * degrada silenciosamente si alguna URL falla.
+ */
+export async function generateWeeklyImagePromptsWithAI(
+  params: GenerateWeeklyPromptsParams,
+): Promise<GeneratedWeeklyPrompts> {
+  const apiKey = (
+    params.apiKey ??
+    (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
+    ""
+  ).trim();
+  if (!apiKey) {
+    throw new Error(
+      "No hay API Key de Gemini configurada para generar prompts visuales. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+    );
+  }
+
+  const fetchImpl = params.fetchFn ?? fetch;
+  const model = resolveGeminiModel(
+    params.model ?? (import.meta.env["VITE_GEMINI_MODEL"] as string | undefined),
+  );
+
+  const referenceUrls = (params.referenceImageUrls ?? [])
+    .map((url) => url.trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  const referenceParts = (
+    await Promise.all(referenceUrls.map((url) => fetchImageAsInlineData(url, fetchImpl)))
+  ).filter((part): part is { mimeType: string; data: string } => part !== null);
+
+  const request = buildWeeklyVisualPromptsRequest({
+    branch: params.branch,
+    count: params.count,
+    aspectRatio: params.aspectRatio,
+    campaignContext: params.campaignContext,
+    referenceCount: referenceParts.length,
+  });
+
+  const thinkingConfig = buildGeminiThinkingConfig(model);
+  const endpoint = buildGeminiEndpoint(model, apiKey);
+
+  const items = await retryUntilValid(
+    async () => {
+      const response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: request.systemPrompt }],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [
+                { text: request.userPrompt },
+                ...referenceParts.map((part) => ({
+                  inlineData: { mimeType: part.mimeType, data: part.data },
+                })),
+              ],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: WEEKLY_IMAGE_PROMPTS_RESPONSE_SCHEMA,
+            temperature: 0.8,
+            ...(thinkingConfig ? { thinkingConfig } : {}),
+          },
+        }),
+      });
+
+      if (!response.ok) {
+        throw await buildGeminiHttpError(response, "Gemini Prompts");
+      }
+
+      const payload = (await response.json()) as {
+        candidates?: Array<{ content?: { parts?: GeminiCandidatePart[] } }>;
+      };
+      const content = extractGeminiResponseText(payload);
+      if (!content) {
+        throw new Error("Gemini Prompts devolvió una respuesta vacía.");
+      }
+      return content;
+    },
+    parseAndValidateWeeklyPromptsResponse,
+  );
+
+  return {
+    provider: "gemini",
+    model,
+    aspectRatio: request.aspectRatio,
+    items,
+    plan: request.plan,
+    referenceImagesUsed: referenceParts.length,
+  };
 }

@@ -1,19 +1,33 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2 } from "lucide-react";
+import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2, Trash2, Loader2, TriangleAlert, Palette } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { normalizeBrandKit } from "@/lib/brand";
+import { extractStoragePath, hasAffectedRows, isMissingBrandKitColumnError } from "@/lib/data";
+import { isIntegrationTokenExpired } from "@/lib/publish";
+import { syncMetaIntegrationServerFn } from "@/lib/publish-server";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
-import type { IntegracionSocial, Sucursal } from "@/types";
+import type { BrandKit, IntegracionSocial, Sucursal } from "@/types";
 
 export const Route = createFileRoute("/settings")({
   head: () => ({
@@ -38,13 +52,25 @@ const integrations = [
   },
 ];
 
+const BRAND_COLOR_FIELDS = [
+  { key: "primary_color", label: "Color primario" },
+  { key: "secondary_color", label: "Color secundario" },
+  { key: "accent_color", label: "Color de acento" },
+] as const;
+
 function Settings() {
-  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
+  const { sucursales, sucursalActiva, setSucursales, setSucursalActiva, removeSucursal } = useBranchStore();
 
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
   const [rules, setRules] = useState("");
+  const [brandKit, setBrandKit] = useState<BrandKit>({});
   const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
+  const [pageIdInput, setPageIdInput] = useState("");
+  const [igUserIdInput, setIgUserIdInput] = useState("");
+  const [isSyncingMeta, setIsSyncingMeta] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [isDeletingBranch, setIsDeletingBranch] = useState(false);
 
   useEffect(() => {
     const fetchSucursales = async () => {
@@ -73,85 +99,102 @@ function Settings() {
       setName(sucursalActiva.nombre ?? "");
       setTone(sucursalActiva.tono ?? "");
       setRules(sucursalActiva.reglas_negativas ?? "");
+      setBrandKit(normalizeBrandKit(sucursalActiva.brand_kit));
+    } else {
+      setName("");
+      setTone("");
+      setRules("");
+      setBrandKit({});
     }
   }, [sucursalActiva]);
 
   useEffect(() => {
     if (!sucursalActiva || !supabase) {
       setBranchIntegrations([]);
+      setPageIdInput("");
+      setIgUserIdInput("");
       return;
     }
 
     supabase
       .from("integraciones_sociales")
-      .select("*")
+      .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
       .eq("sucursal_id", sucursalActiva.id)
       .then(({ data, error }) => {
         if (!error && data) {
-          setBranchIntegrations(data as IntegracionSocial[]);
+          const rows = data as IntegracionSocial[];
+          setBranchIntegrations(rows);
+          const metaRow =
+            rows.find((r) => r.plataforma === "Instagram_Graph_API") ?? rows[0];
+          setPageIdInput(metaRow?.page_id ?? "");
+          setIgUserIdInput(metaRow?.ig_user_id ?? "");
         }
       });
   }, [sucursalActiva?.id]);
 
-  const handleToggleIntegration = async (platform: string) => {
+  const handleSyncMetaIntegration = async () => {
     if (!sucursalActiva) {
       toast.error("Selecciona una sucursal primero");
       return;
     }
-    const existing = branchIntegrations.find((i) => i.plataforma === platform);
-    if (!supabase) {
-      toast.success("Estado de integración actualizado");
-      return;
-    }
 
+    setIsSyncingMeta(true);
     try {
-      if (existing) {
-        const nextToken = existing.token_cifrado ? null : `token_${Date.now()}`;
-        const { data, error } = await supabase
-          .from("integraciones_sociales")
-          .update({ token_cifrado: nextToken })
-          .eq("id", existing.id)
-          .select()
-          .single();
+      const result = await syncMetaIntegrationServerFn({
+        data: {
+          sucursalId: sucursalActiva.id,
+          pageId: pageIdInput.trim() || undefined,
+          igUserId: igUserIdInput.trim() || undefined,
+        },
+      });
 
-        if (error) throw error;
-        if (data) {
-          setBranchIntegrations((prev) =>
-            prev.map((item) => (item.id === existing.id ? (data as IntegracionSocial) : item)),
-          );
-          toast.success(nextToken ? "Cuenta conectada correctamente" : "Cuenta desconectada");
-        }
-      } else {
-        const { data, error } = await supabase
-          .from("integraciones_sociales")
-          .insert([
-            {
-              sucursal_id: sucursalActiva.id,
-              plataforma: platform,
-              token_cifrado: `token_${Date.now()}`,
-            },
-          ])
-          .select()
-          .single();
+      if (!result.ok) {
+        toast.error(
+          result.errorMessage ?? "No se pudo verificar la integración con Meta Graph API.",
+        );
+        return;
+      }
 
-        if (error) throw error;
+      setPageIdInput(result.pageId ?? "");
+      setIgUserIdInput(result.igUserId ?? "");
+
+      if (supabase) {
+        const { data } = await supabase
+          .from("integraciones_sociales")
+          .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
+          .eq("sucursal_id", sucursalActiva.id);
         if (data) {
-          setBranchIntegrations((prev) => [...prev, data as IntegracionSocial]);
-          toast.success("Cuenta conectada correctamente");
+          setBranchIntegrations(data as IntegracionSocial[]);
         }
       }
-    } catch (error: any) {
-      console.error(error);
-      toast.error(
-        error?.message ? `Error en integración: ${error.message}` : "No se pudo actualizar la integración",
+
+      toast.success(
+        `Integración con Meta verificada${result.pageId ? ` (Page ID: ${result.pageId})` : ""}`,
       );
+    } catch (error: any) {
+      toast.error(
+        error?.message ?? "Error al sincronizar la integración con el servidor.",
+      );
+    } finally {
+      setIsSyncingMeta(false);
     }
+  };
+
+  const updateBrandColor = (
+    key: (typeof BRAND_COLOR_FIELDS)[number]["key"],
+    value: string,
+  ) => {
+    setBrandKit((prev) => ({
+      ...prev,
+      [key]: value.trim() ? value.toUpperCase() : undefined,
+    }));
   };
 
   const handleSaveBranch = async () => {
     const cleanName = (name ?? "").trim();
     const cleanTone = (tone ?? "").trim();
     const cleanRules = (rules ?? "").trim();
+    const cleanBrandKit = normalizeBrandKit(brandKit);
 
     if (!cleanName) {
       toast.error("El nombre de la sucursal es obligatorio");
@@ -165,12 +208,23 @@ function Settings() {
       toast.error("Selecciona o crea una sucursal primero");
       return;
     }
+
+    const hasInvalidColor = BRAND_COLOR_FIELDS.some(({ key }) => {
+      const raw = (brandKit[key] ?? "").trim();
+      return raw.length > 0 && !cleanBrandKit[key];
+    });
+    if (hasInvalidColor) {
+      toast.error("Los colores del Brand Kit deben tener formato hexadecimal (#RGB o #RRGGBB)");
+      return;
+    }
+
     if (!supabase) {
       const updated: Sucursal = {
         ...sucursalActiva,
         nombre: cleanName,
         tono: cleanTone || "Cercano",
         reglas_negativas: cleanRules,
+        brand_kit: cleanBrandKit,
       };
       setSucursalActiva(updated);
       setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
@@ -179,28 +233,53 @@ function Settings() {
     }
 
     try {
-      const { data, error } = await supabase
+      const basePayload = {
+        nombre: cleanName,
+        tono: cleanTone || "Cercano",
+        reglas_negativas: cleanRules,
+      };
+
+      let response = await supabase
         .from("sucursales")
-        .update({
-          nombre: cleanName,
-          tono: cleanTone || "Cercano",
-          reglas_negativas: cleanRules,
-        })
+        .update({ ...basePayload, brand_kit: cleanBrandKit })
         .eq("id", sucursalActiva.id)
         .select();
 
-      if (error) throw error;
-      if (!data || data.length === 0) {
+      let brandKitPersisted = true;
+
+      // Fallback: si la columna `brand_kit` aún no existe en el proyecto remoto,
+      // se guarda el resto de la sucursal y se conserva el Brand Kit en el store local.
+      if (response.error && isMissingBrandKitColumnError(response.error)) {
+        brandKitPersisted = false;
+        response = await supabase
+          .from("sucursales")
+          .update(basePayload)
+          .eq("id", sucursalActiva.id)
+          .select();
+      }
+
+      if (response.error) throw response.error;
+      if (!response.data || response.data.length === 0) {
         toast.error(
           "No se pudo actualizar la sucursal en Supabase. Verifica las políticas RLS (UPDATE) de la tabla 'sucursales'.",
         );
         return;
       }
 
-      const updated = data[0] as Sucursal;
+      const updated: Sucursal = {
+        ...(response.data[0] as Sucursal),
+        brand_kit: cleanBrandKit,
+      };
       setSucursalActiva(updated);
       setSucursales(sucursales.map((s) => (s.id === updated.id ? updated : s)));
-      toast.success("Cambios de sucursal guardados en Supabase");
+
+      if (brandKitPersisted) {
+        toast.success("Cambios de sucursal guardados en Supabase");
+      } else {
+        toast.warning(
+          "Se guardó la sucursal, pero el Brand Kit no se persistió: falta la columna 'brand_kit'. Ejecuta el ALTER TABLE en Supabase.",
+        );
+      }
     } catch (error: any) {
       console.error(error);
       toast.error(
@@ -261,6 +340,76 @@ function Settings() {
     }
   };
 
+  const handleDeleteBranch = async () => {
+    if (!sucursalActiva) return;
+    const branchToDelete = sucursalActiva;
+    setIsDeletingBranch(true);
+
+    if (!supabase) {
+      removeSucursal(branchToDelete.id);
+      setIsDeletingBranch(false);
+      setConfirmDeleteOpen(false);
+      toast.success(`Sucursal "${branchToDelete.nombre}" eliminada`);
+      return;
+    }
+
+    try {
+      const { data: branchAssets } = await supabase
+        .from("activos")
+        .select("id, url_imagen")
+        .eq("sucursal_id", branchToDelete.id);
+
+      await supabase.from("publicaciones").delete().eq("sucursal_id", branchToDelete.id);
+      await supabase.from("integraciones_sociales").delete().eq("sucursal_id", branchToDelete.id);
+      await supabase.from("activos").delete().eq("sucursal_id", branchToDelete.id);
+
+      const { data: deletedRows, error: deleteError } = await supabase
+        .from("sucursales")
+        .delete()
+        .eq("id", branchToDelete.id)
+        .select();
+
+      if (deleteError) {
+        if (deleteError.code === "23503") {
+          toast.error(
+            "No se pudo eliminar la sucursal porque aún tiene registros vinculados en Supabase.",
+          );
+          return;
+        }
+        throw deleteError;
+      }
+
+      if (!hasAffectedRows(deletedRows)) {
+        toast.error(
+          "Supabase bloqueó el borrado (0 filas afectadas). Activa la política RLS de DELETE para la tabla 'sucursales' en Supabase.",
+        );
+        return;
+      }
+
+      if (branchAssets && branchAssets.length > 0) {
+        const storagePaths = branchAssets
+          .map((a: any) => extractStoragePath(a.url_imagen || "", "galeria"))
+          .filter((p): p is string => Boolean(p));
+        if (storagePaths.length > 0) {
+          await supabase.storage.from("galeria").remove(storagePaths);
+        }
+      }
+
+      removeSucursal(branchToDelete.id);
+      setConfirmDeleteOpen(false);
+      toast.success(`Sucursal "${branchToDelete.nombre}" eliminada correctamente`);
+    } catch (error: any) {
+      console.error(error);
+      toast.error(
+        error?.message
+          ? `Error al eliminar sucursal: ${error.message}`
+          : "No se pudo eliminar la sucursal",
+      );
+    } finally {
+      setIsDeletingBranch(false);
+    }
+  };
+
   return (
     <AppShell title="Configuración de Espacio" subtitle="Administra tus sucursales y conexiones con redes sociales">
       <Tabs defaultValue="sucursales" className="space-y-5">
@@ -302,6 +451,7 @@ function Settings() {
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="Ej. Sede Centro"
+                  disabled={!sucursalActiva}
                 />
               </div>
               <div className="space-y-2">
@@ -311,7 +461,8 @@ function Settings() {
                   rows={3}
                   value={tone}
                   onChange={(e) => setTone(e.target.value)}
-                  placeholder="Ej. Cercano y cálido, como un barista que conoce a sus clientes por su nombre."
+                  placeholder="Ej. Cercano y cálido, profesional o corporativo según la identidad de la sede."
+                  disabled={!sucursalActiva}
                 />
               </div>
               <div className="space-y-2">
@@ -322,19 +473,132 @@ function Settings() {
                   value={rules}
                   onChange={(e) => setRules(e.target.value)}
                   placeholder={'Nunca mencionar a la competencia. No usar "barato" ni "instantáneo".'}
+                  disabled={!sucursalActiva}
                 />
               </div>
+
+              <div className="space-y-4 rounded-xl border bg-muted/40 p-4">
+                <div className="flex items-center gap-2">
+                  <Palette className="h-4 w-4 text-violet" />
+                  <p className="text-sm font-semibold text-foreground">Identidad Visual (Brand Kit)</p>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  La IA usa estos datos para describir la paleta, el estilo y el espacio del logo en
+                  los prompts visuales. Todo es opcional.
+                </p>
+
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {BRAND_COLOR_FIELDS.map(({ key, label }) => (
+                    <div key={key} className="space-y-2">
+                      <Label htmlFor={`brand-${key}`}>{label}</Label>
+                      <div className="flex items-center gap-2">
+                        <input
+                          id={`brand-${key}`}
+                          type="color"
+                          aria-label={label}
+                          value={brandKit[key] ?? "#FFFFFF"}
+                          onChange={(e) => updateBrandColor(key, e.target.value)}
+                          disabled={!sucursalActiva}
+                          className="h-9 w-12 shrink-0 cursor-pointer rounded-md border border-input bg-card p-0.5 disabled:cursor-not-allowed disabled:opacity-50"
+                        />
+                        <Input
+                          value={brandKit[key] ?? ""}
+                          onChange={(e) => updateBrandColor(key, e.target.value)}
+                          placeholder="#RRGGBB"
+                          disabled={!sucursalActiva}
+                          className="font-mono text-xs"
+                        />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="brand-visual-style">Estilo visual</Label>
+                  <Textarea
+                    id="brand-visual-style"
+                    rows={2}
+                    value={brandKit.visual_style ?? ""}
+                    onChange={(e) =>
+                      setBrandKit((prev) => ({
+                        ...prev,
+                        visual_style: e.target.value.trim() ? e.target.value : undefined,
+                      }))
+                    }
+                    placeholder="Ej. Minimalista moderno, iluminación cálida, estilo editorial."
+                    disabled={!sucursalActiva}
+                  />
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="brand-reserve-logo">Reservar espacio para el logo</Label>
+                    <p className="text-xs text-muted-foreground">
+                      Añade una zona limpia en la composición para superponer el logo después.
+                    </p>
+                  </div>
+                  <Switch
+                    id="brand-reserve-logo"
+                    checked={brandKit.reserve_logo_space ?? false}
+                    onCheckedChange={(checked) =>
+                      setBrandKit((prev) => ({ ...prev, reserve_logo_space: checked }))
+                    }
+                    disabled={!sucursalActiva}
+                  />
+                </div>
+              </div>
             </CardContent>
-            <CardFooter className="justify-end">
-              <Button variant="cta" onClick={handleSaveBranch}><Save /> Guardar Cambios</Button>
+            <CardFooter className="flex flex-wrap items-center justify-between gap-3">
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={!sucursalActiva || isDeletingBranch}
+                onClick={() => setConfirmDeleteOpen(true)}
+              >
+                <Trash2 /> Eliminar Sucursal
+              </Button>
+              <Button variant="cta" disabled={!sucursalActiva} onClick={handleSaveBranch}>
+                <Save /> Guardar Cambios
+              </Button>
             </CardFooter>
           </Card>
+
+          <AlertDialog open={confirmDeleteOpen} onOpenChange={setConfirmDeleteOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle className="flex items-center gap-2">
+                  <TriangleAlert className="h-5 w-5 text-destructive" />
+                  ¿Estás seguro de eliminar esta sucursal?
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  Vas a eliminar permanentemente la sucursal{" "}
+                  <strong className="text-foreground">"{sucursalActiva?.nombre}"</strong> junto con
+                  sus publicaciones, activos e integraciones vinculadas. Esta acción no se puede
+                  deshacer.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel disabled={isDeletingBranch}>Cancelar</AlertDialogCancel>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  disabled={isDeletingBranch}
+                  onClick={handleDeleteBranch}
+                >
+                  {isDeletingBranch ? <Loader2 className="animate-spin" /> : <Trash2 />}
+                  {isDeletingBranch ? "Eliminando..." : "Sí, eliminar sucursal"}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </TabsContent>
 
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
           {integrations.map((it) => {
             const record = branchIntegrations.find((b) => b.plataforma === it.platform);
-            const isConnected = Boolean(record?.token_cifrado);
+            const isExpired = isIntegrationTokenExpired(record);
+            const isConnected =
+              Boolean(record?.page_id || record?.ig_user_id) && !isExpired;
             return (
               <Card key={it.name} className="shadow-card">
                 <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
@@ -343,22 +607,70 @@ function Settings() {
                       <div key={i} className="grid h-10 w-10 place-items-center rounded-xl bg-primary-soft text-primary"><I className="h-5 w-5" /></div>
                     ))}
                   </div>
-                  <Badge variant={isConnected ? "scheduled" : "secondary"}>
-                    {isConnected ? "Conectado" : "Desconectado"}
+                  <Badge
+                    variant={
+                      isExpired ? "error" : isConnected ? "published" : "secondary"
+                    }
+                  >
+                    {isExpired
+                      ? "Token Expirado (190)"
+                      : isConnected
+                        ? "Conectado (Etapa 1)"
+                        : "Modo Etapa 1 (Server Secret)"}
                   </Badge>
                 </CardHeader>
-                <CardContent className="space-y-1">
-                  <CardTitle className="font-display text-base">{it.name}</CardTitle>
-                  <CardDescription>{it.desc}</CardDescription>
+                <CardContent className="space-y-3">
+                  <div>
+                    <CardTitle className="font-display text-base">{it.name}</CardTitle>
+                    <CardDescription>{it.desc}</CardDescription>
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    <div className="space-y-1">
+                      <Label htmlFor="meta-page-id" className="text-xs">
+                        Facebook Page ID (opcional si el token resuelve /me)
+                      </Label>
+                      <Input
+                        id="meta-page-id"
+                        value={pageIdInput}
+                        onChange={(e) => setPageIdInput(e.target.value)}
+                        placeholder="Ej. 123456789012345"
+                        className="font-mono text-xs"
+                        disabled={!sucursalActiva || isSyncingMeta}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label htmlFor="meta-ig-user-id" className="text-xs">
+                        Instagram Business User ID (opcional)
+                      </Label>
+                      <Input
+                        id="meta-ig-user-id"
+                        value={igUserIdInput}
+                        onChange={(e) => setIgUserIdInput(e.target.value)}
+                        placeholder="Ej. 17841400000000000"
+                        className="font-mono text-xs"
+                        disabled={!sucursalActiva || isSyncingMeta}
+                      />
+                    </div>
+                  </div>
                 </CardContent>
                 <CardFooter>
                   <Button
-                    variant={isConnected ? "outline" : "cta"}
+                    variant="cta"
                     className="w-full"
-                    onClick={() => handleToggleIntegration(it.platform)}
+                    disabled={!sucursalActiva || isSyncingMeta}
+                    onClick={handleSyncMetaIntegration}
                   >
-                    {isConnected ? <CheckCircle2 /> : <Plug />}
-                    {isConnected ? "Desconectar Cuenta" : "Conectar Cuenta"}
+                    {isSyncingMeta ? (
+                      <Loader2 className="animate-spin" />
+                    ) : isConnected ? (
+                      <CheckCircle2 />
+                    ) : (
+                      <Plug />
+                    )}
+                    {isSyncingMeta
+                      ? "Verificando con Meta..."
+                      : "Verificar y Guardar IDs de Meta"}
                   </Button>
                 </CardFooter>
               </Card>

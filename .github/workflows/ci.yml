@@ -4,11 +4,15 @@ on:
   push:
     branches:
       - main
+      - connect_real_llm_vision
+      - meta_graph_api_publishing
       - setup_multibrand_architecture_store
       - "feature/**"
   pull_request:
     branches:
       - main
+      - connect_real_llm_vision
+      - meta_graph_api_publishing
       - setup_multibrand_architecture_store
 
 jobs:

@@ -21,7 +21,7 @@ export const sampleBranches: Sucursal[] = [
   },
 ];
 
-export type Status = "pendiente" | "programado";
+export type Status = "pendiente" | "programado" | "publicando" | "publicado" | "error";
 export interface Post {
   id: number;
   img: string;
@@ -61,6 +61,19 @@ export const MAX_ASSET_SIZE_BYTES = 8 * 1024 * 1024;
 /** Formatos de imagen soportados por Meta Graph API (REQ-2.1). */
 export const ALLOWED_ASSET_MIME_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
 
+/** Dimensión mínima en píxeles exigida por Meta Graph API (REQ-2.1). */
+export const MIN_ASSET_DIMENSION_PX = 320;
+
+/** Rango oficial de relación de aspecto (ancho / alto) para Feed de Meta: 4:5 (0.8) a 1.91:1 (1.91). */
+export const META_FEED_MIN_ASPECT_RATIO = 4 / 5;
+export const META_FEED_MAX_ASPECT_RATIO = 1.91;
+
+/** Relación de aspecto oficial para Stories / Reels de Meta: 9:16 (0.5625). */
+export const META_STORY_ASPECT_RATIO = 9 / 16;
+
+/** Tolerancia del 5% para variaciones menores de recorte en cámara o exportación. */
+export const META_ASPECT_RATIO_TOLERANCE = 0.05;
+
 export const countUnused = (list: Asset[]) => list.filter((a) => a.uses === 0).length;
 
 export const isLowStock = (list: Asset[]) => countUnused(list) < LOW_STOCK_THRESHOLD;
@@ -96,6 +109,101 @@ export function validateAssetFile(file: { size: number; type: string }): AssetVa
   return { valid: true };
 }
 
+export interface ImageDimensionValidationResult {
+  valid: boolean;
+  aspectRatio?: number | undefined;
+  format?: "FEED" | "STORY" | undefined;
+  reason?: string | undefined;
+}
+
+/**
+ * Fase C (REQ-2.1): Valida que el ancho, alto y relación de aspecto (`width / height`)
+ * de una imagen cumplan con los rangos permitidos por Meta Graph API:
+ * - Resolución mínima de 320×320 px.
+ * - Feed: entre 4:5 (0.8) y 1.91:1 (incluyendo 1:1 cuadrado), con 5% de tolerancia.
+ * - Stories: 9:16 (0.5625), con 5% de tolerancia.
+ */
+export function validateImageDimensions(
+  width: number,
+  height: number,
+): ImageDimensionValidationResult {
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return {
+      valid: false,
+      reason: "No se pudieron leer las dimensiones de la imagen.",
+    };
+  }
+
+  if (width < MIN_ASSET_DIMENSION_PX || height < MIN_ASSET_DIMENSION_PX) {
+    return {
+      valid: false,
+      reason: `Resolución insuficiente (${Math.round(width)}×${Math.round(height)} px). Meta API exige un mínimo de ${MIN_ASSET_DIMENSION_PX}×${MIN_ASSET_DIMENSION_PX} px.`,
+    };
+  }
+
+  const aspectRatio = Number((width / height).toFixed(4));
+
+  const feedMin = META_FEED_MIN_ASPECT_RATIO * (1 - META_ASPECT_RATIO_TOLERANCE);
+  const feedMax = META_FEED_MAX_ASPECT_RATIO * (1 + META_ASPECT_RATIO_TOLERANCE);
+
+  const storyMin = META_STORY_ASPECT_RATIO * (1 - META_ASPECT_RATIO_TOLERANCE);
+  const storyMax = META_STORY_ASPECT_RATIO * (1 + META_ASPECT_RATIO_TOLERANCE);
+
+  if (aspectRatio >= feedMin && aspectRatio <= feedMax) {
+    return {
+      valid: true,
+      aspectRatio,
+      format: "FEED",
+    };
+  }
+
+  if (aspectRatio >= storyMin && aspectRatio <= storyMax) {
+    return {
+      valid: true,
+      aspectRatio,
+      format: "STORY",
+    };
+  }
+
+  return {
+    valid: false,
+    aspectRatio,
+    reason: `Relación de aspecto no compatible con Meta API (${Math.round(width)}×${Math.round(height)} px, proporción ${aspectRatio.toFixed(2)}:1). Usa formato Feed (4:5 vertical, 1:1 cuadrado o hasta 1.91:1 horizontal) o Stories (9:16).`,
+  };
+}
+
+/**
+ * Lee las dimensiones reales (`naturalWidth` y `naturalHeight`) de un archivo de imagen en el navegador
+ * antes de subirlo a Supabase Storage.
+ */
+export function readImageDimensions(
+  file: Blob,
+): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    if (typeof Image === "undefined" || typeof URL === "undefined" || !URL.createObjectURL) {
+      reject(new Error("API de inspección de imagen no disponible en este entorno."));
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+
+    img.onload = () => {
+      const width = img.naturalWidth || img.width;
+      const height = img.naturalHeight || img.height;
+      URL.revokeObjectURL(objectUrl);
+      resolve({ width, height });
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("El archivo de imagen está dañado o no se pudo decodificar."));
+    };
+
+    img.src = objectUrl;
+  });
+}
+
 /**
  * Extrae la ruta interna del objeto en Supabase Storage a partir de su URL pública.
  */
@@ -106,6 +214,27 @@ export function extractStoragePath(publicUrl: string, bucket = "galeria"): strin
   if (idx === -1) return null;
   const rawPath = publicUrl.slice(idx + marker.length).split("?")[0];
   return rawPath ? decodeURIComponent(rawPath) : null;
+}
+
+/**
+ * Detecta el error de PostgREST/Postgres cuando la columna `brand_kit` todavía
+ * no existe en el proyecto remoto (migración pendiente). Permite degradar sin
+ * bloquear el guardado del resto de campos de la sucursal.
+ */
+export function isMissingBrandKitColumnError(
+  error: { code?: string | undefined; message?: string | undefined } | null | undefined,
+): boolean {
+  if (!error) return false;
+  if (error.code === "PGRST204" || error.code === "42703") return true;
+
+  const message = (error.message ?? "").toLowerCase();
+  if (!message.includes("brand_kit")) return false;
+
+  return (
+    message.includes("does not exist") ||
+    message.includes("schema cache") ||
+    message.includes("could not find")
+  );
 }
 
 /**
@@ -155,4 +284,151 @@ export function inferTagsFromFilename(filename: string): string[] {
  */
 export function hasAffectedRows(rows: unknown[] | null | undefined): boolean {
   return Array.isArray(rows) && rows.length > 0;
+}
+
+export const SUPPORTED_SOCIAL_NETWORKS = ["Instagram", "Facebook"] as const;
+export type SocialNetwork = (typeof SUPPORTED_SOCIAL_NETWORKS)[number];
+
+/** Límite máximo de caracteres permitido para el copy de una publicación en Meta. */
+export const MAX_POST_COPY_LENGTH = 2200;
+
+/**
+ * Convierte una fecha ISO o instancia `Date` al formato `YYYY-MM-DDTHH:mm`
+ * requerido por `<input type="datetime-local" />` en la zona horaria local.
+ */
+export function toDatetimeLocalInputValue(
+  isoOrDate: string | Date | null | undefined,
+  fallbackNow: Date = new Date(),
+): string {
+  let d: Date;
+  if (isoOrDate instanceof Date) {
+    d = isoOrDate;
+  } else if (typeof isoOrDate === "string" && isoOrDate.trim()) {
+    const parsed = new Date(isoOrDate);
+    d = Number.isNaN(parsed.getTime()) ? fallbackNow : parsed;
+  } else {
+    d = fallbackNow;
+  }
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const year = d.getFullYear();
+  const month = pad(d.getMonth() + 1);
+  const day = pad(d.getDate());
+  const hours = pad(d.getHours());
+  const minutes = pad(d.getMinutes());
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
+/**
+ * Parsea y valida un valor de `<input type="datetime-local" />` devolviendo su representación ISO 8601
+ * para guardar en `publicaciones.fecha_publicacion`, o `null` si la fecha es inválida.
+ */
+export function parseDatetimeLocalToIso(datetimeLocalValue: string): string | null {
+  const cleaned = datetimeLocalValue.trim();
+  if (!cleaned) return null;
+  const parsed = new Date(cleaned);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.toISOString();
+}
+
+/**
+ * Formatea una fecha ISO en etiqueta legible (`es-CO`) para mostrar en la tarjeta de publicación.
+ */
+export function formatScheduledDateLabel(isoDate: string): string {
+  const parsed = new Date(isoDate);
+  if (Number.isNaN(parsed.getTime())) return isoDate;
+  return parsed.toLocaleString("es-CO", {
+    dateStyle: "short",
+    timeStyle: "short",
+  });
+}
+
+export interface PostEditValidationResult {
+  valid: boolean;
+  reason?: string | undefined;
+  normalizedCopy?: string | undefined;
+  network?: SocialNetwork | undefined;
+  scheduledIso?: string | undefined;
+}
+
+/**
+ * Fase B: Valida los campos editados de una publicación (copy, red social y fecha/hora programada)
+ * antes de persistirlos en la tabla `publicaciones` de Supabase.
+ */
+export function validatePostEditPayload(input: {
+  copy: string;
+  network: string;
+  scheduledAtLocal: string;
+}): PostEditValidationResult {
+  const normalizedCopy = input.copy.trim();
+  if (!normalizedCopy) {
+    return {
+      valid: false,
+      reason: "El texto de la publicación no puede quedar vacío.",
+    };
+  }
+
+  if (normalizedCopy.length > MAX_POST_COPY_LENGTH) {
+    return {
+      valid: false,
+      reason: `El texto supera el máximo de ${MAX_POST_COPY_LENGTH} caracteres permitido.`,
+    };
+  }
+
+  if (
+    !SUPPORTED_SOCIAL_NETWORKS.includes(
+      input.network as (typeof SUPPORTED_SOCIAL_NETWORKS)[number],
+    )
+  ) {
+    return {
+      valid: false,
+      reason: "Selecciona una red social válida (Instagram o Facebook).",
+    };
+  }
+
+  const scheduledIso = parseDatetimeLocalToIso(input.scheduledAtLocal);
+  if (!scheduledIso) {
+    return {
+      valid: false,
+      reason: "Selecciona una fecha y hora de publicación válida.",
+    };
+  }
+
+  return {
+    valid: true,
+    normalizedCopy,
+    network: input.network as SocialNetwork,
+    scheduledIso,
+  };
+}
+
+/**
+ * Cuenta cuántas publicaciones de la sucursal tienen estado `publicado` / `publicada`
+ * dentro del mes y año de referencia (`now`). Si no hay ninguna, devuelve `0`.
+ */export function countPublishedThisMonth(
+  list: ReadonlyArray<{
+    status: string;
+    scheduledAtIso?: string | null | undefined;
+    publishedAtIso?: string | null | undefined;
+  }>,
+  now: Date = new Date(),
+): number {
+  const targetYear = now.getFullYear();
+  const targetMonth = now.getMonth();
+
+  return list.filter((item) => {
+    const normalizedStatus = item.status.trim().toLowerCase();
+    if (normalizedStatus !== "publicado" && normalizedStatus !== "publicada") {
+      return false;
+    }
+    const refIso = item.publishedAtIso || item.scheduledAtIso;
+    if (!refIso) {
+      return true;
+    }
+    const parsed = new Date(refIso);
+    if (Number.isNaN(parsed.getTime())) {
+      return true;
+    }
+    return parsed.getFullYear() === targetYear && parsed.getMonth() === targetMonth;
+  }).length;
 }

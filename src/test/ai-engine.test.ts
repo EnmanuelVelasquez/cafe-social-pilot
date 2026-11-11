@@ -1,19 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
+  GEMINI_DEFAULT_MODEL,
   MAX_JSON_RETRIES,
-  buildContextualDraft,
+  MAX_WEEKLY_IMAGE_COUNT,
+  WEEKLY_PILLAR_SHARES,
+  analyzeAssetImageTags,
+  buildGeminiEndpoint,
+  buildPostGenerationUserPrompt,
+  buildVisionTaggingPrompt,
+  calculateWeeklyBatchPlan,
+  callGeminiVisionForTags,
+  describeToneVisualStyle,
+  extractGeminiResponseText,
+  extractInlineDataFromDataUrl,
+  generateSocialPostForBranch,
   generateWithRetry,
+  normalizeWeeklyImageCount,
   parseAndValidateAIPostResponse,
+  parseAndValidateVisionTagsResponse,
+  resolveGeminiModel,
   resolveInitialPostStatus,
+  resolveWeeklyImageAspectRatio,
   selectBestMatchingAsset,
+  summarizeWeeklyBatchPlan,
 } from "@/lib/ai-engine";
 import type { Asset } from "@/lib/data";
 
 const mockAssets: Asset[] = [
-  { id: "a-1", img: "url-1", name: "Taza", tags: ["#producto", "#ambiente"], uses: 5 },
-  { id: "a-2", img: "url-2", name: "Cosecha", tags: ["#origen", "#educativo"], uses: 2 },
-  { id: "a-3", img: "url-3", name: "Latte Nuevo", tags: ["#producto", "#ambiente"], uses: 0 },
+  { id: "a-1", img: "url-1", name: "Activo 1", tags: ["#producto", "#ambiente"], uses: 5 },
+  { id: "a-2", img: "url-2", name: "Activo 2", tags: ["#origen", "#educativo"], uses: 2 },
+  { id: "a-3", img: "url-3", name: "Activo 3", tags: ["#producto", "#ambiente"], uses: 0 },
 ];
 
 describe("Validador JSON y Reintentos del Motor IA (REQ-3.1 y Riesgo 2)", () => {
@@ -91,17 +109,316 @@ describe("Algoritmo de Cruce y Control de Desgaste (REQ-3.2, REQ-2.3 y Riesgo 1)
     expect(resolveInitialPostStatus(false)).toBe("pendiente");
     expect(resolveInitialPostStatus(true)).toBe("programado");
   });
+});
 
-  it("construye un borrador contextual válido para la sucursal", () => {
-    const draft = buildContextualDraft(
-      {
-        nombre: "Sede Norte",
-        tono: "Profesional",
-        reglas_negativas: "No usar barato",
-      },
-      mockAssets,
+describe("Visión Computacional y Auto-Tagging con Google Gemini (REQ-2.2)", () => {
+  it("normaliza y valida las etiquetas devueltas por el modelo de visión", () => {
+    const raw = `\`\`\`json
+    {
+      "tags": ["Producto", "#Consultoria Financiera", "ambiente", "PRODUCTO", "Equipo Corporativo"]
+    }
+    \`\`\``;
+
+    const tags = parseAndValidateVisionTagsResponse(raw);
+    expect(tags).toEqual([
+      "#producto",
+      "#consultoria_financiera",
+      "#ambiente",
+      "#equipo_corporativo",
+    ]);
+  });
+
+  it("rechaza respuestas de visión vacías o sin etiquetas válidas", () => {
+    expect(() => parseAndValidateVisionTagsResponse("{}")).toThrow();
+    expect(() => parseAndValidateVisionTagsResponse({ tags: [] })).toThrow();
+  });
+
+  it("extrae mimeType y base64 de un Data URL válido", () => {
+    expect(extractInlineDataFromDataUrl("data:image/webp;base64,UklGRg==")).toEqual({
+      mimeType: "image/webp",
+      data: "UklGRg==",
+    });
+    expect(extractInlineDataFromDataUrl("https://example.com/foto.jpg")).toBeNull();
+  });
+
+  it("construye el prompt de visión agnóstico al giro de negocio incluyendo el nombre de la marca", () => {
+    const prompt = buildVisionTaggingPrompt("Clínica Dental Sonrisa");
+    expect(prompt).toContain("Clínica Dental Sonrisa");
+    expect(prompt).toContain('"tags"');
+  });
+
+  it("actualiza automáticamente modelos retirados como gemini-2.5-flash a gemini-3.8-flash", () => {
+    expect(GEMINI_DEFAULT_MODEL).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("gemini-2.5-flash")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel("models/gemini-2.5-flash")).toBe("gemini-3.8-flash");
+    expect(resolveGeminiModel(undefined)).toBe("gemini-3.8-flash");
+  });
+
+  it("ignora bloques internos de razonamiento (thought: true) al extraer el JSON de Gemini", () => {
+    const extracted = extractGeminiResponseText({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { thought: true, text: "Pensando qué copy redactar..." },
+              { text: '{"tags":["#servicio"]}' },
+            ],
+          },
+        },
+      ],
+    });
+    expect(extracted).toBe('{"tags":["#servicio"]}');
+  });
+
+  it("invoca Gemini Vision (gemini-2.5-flash) con inlineData y devuelve tags normalizados", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    tags: ["#servicio", "Consultorio Moderno", "#ambiente"],
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      }),
+    });
+
+    const tags = await callGeminiVisionForTags({
+      imageUrl: "data:image/jpeg;base64,AAA",
+      apiKey: "AIzaSy-test-key",
+      branchName: "Clínica Norte",
+      fetchFn: mockFetch as unknown as typeof fetch,
+    });
+
+    expect(tags).toEqual(["#servicio", "#consultorio_moderno", "#ambiente"]);
+    expect(mockFetch).toHaveBeenCalledWith(
+      buildGeminiEndpoint(GEMINI_DEFAULT_MODEL, "AIzaSy-test-key"),
+      expect.objectContaining({
+        method: "POST",
+      }),
     );
 
-    expect(parseAndValidateAIPostResponse(draft).copy_text).toContain("Sede Norte");
+    const requestBody = JSON.parse(mockFetch.mock.calls[0]?.[1]?.body as string);
+    expect(requestBody.contents[0].parts[1]).toEqual({
+      inlineData: { mimeType: "image/jpeg", data: "AAA" },
+    });
+  });
+
+  it("permite guardar usando palabras del archivo en subida inicial si la IA falla, pero exige IA cuando allowFilenameFallback es false", async () => {
+    const failingFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+    });
+
+    const uploadResult = await analyzeAssetImageTags({
+      imageUrl: "data:image/jpeg;base64,AAA",
+      filename: "finanzas-corporativas.jpg",
+      apiKey: "AIzaSy-test-key",
+      allowFilenameFallback: true,
+      fetchFn: failingFetch as unknown as typeof fetch,
+    });
+
+    expect(uploadResult.source).toBe("filename_fallback");
+    expect(uploadResult.tags).toEqual(["#finanzas", "#corporativas"]);
+
+    await expect(
+      analyzeAssetImageTags({
+        imageUrl: "data:image/jpeg;base64,AAA",
+        filename: "finanzas-corporativas.jpg",
+        apiKey: "",
+        webhookUrl: "",
+        allowFilenameFallback: false,
+      }),
+    ).rejects.toThrow(/VITE_GEMINI_API_KEY/);
+  });
+});
+
+describe("Generación de Copy con Google Gemini sin fallback local (REQ-1.2, REQ-3.1, REQ-3.2)", () => {
+  it("construye el prompt de usuario agnóstico al giro con las etiquetas disponibles en la sucursal", () => {
+    const prompt = buildPostGenerationUserPrompt({
+      branchName: "TechCorp Soluciones",
+      availableTags: ["#servicio", "#comunidad"],
+      variantIndex: 1,
+    });
+    expect(prompt).toContain("TechCorp Soluciones");
+    expect(prompt).toContain("servicio, comunidad");
+    expect(prompt).toContain("recommended_visual_tags");
+  });
+
+  it("genera el post con Gemini (gemini-2.5-flash), reintenta ante alucinación JSON y cruza el mejor activo", async () => {
+    const mockFetch = vi
+      .fn()
+      // Primer intento: JSON corrupto
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [{ content: { parts: [{ text: "respuesta no json" }] } }],
+        }),
+      })
+      // Segundo intento: JSON válido cumpliendo el contrato REQ-3.1
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      post_type: "FEED_SINGLE",
+                      copy_text: "Impulsa el crecimiento de tu empresa hoy 🚀 #Innovacion",
+                      recommended_visual_tags: ["origen", "educativo"],
+                      call_to_action_used: true,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      });
+
+    const result = await generateSocialPostForBranch(
+      {
+        id: "suc-1",
+        nombre: "TechCorp Norte",
+        tono: "Profesional",
+        reglas_negativas: "Nunca mencionar la palabra barato",
+      },
+      mockAssets,
+      0,
+      {
+        apiKey: "AIzaSy-gemini-key",
+        fetchFn: mockFetch as unknown as typeof fetch,
+      },
+    );
+
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+    expect(result.provider).toBe("gemini");
+    expect(result.aiResponse.copy_text).toContain("crecimiento");
+    expect(result.matchedAsset.id).toBe("a-2");
+    expect(
+      result.systemPrompt.endsWith(
+        "Bajo ninguna circunstancia debes mencionar o hacer alusión a lo siguiente: [Nunca mencionar la palabra barato]",
+      ),
+    ).toBe(true);
+  });
+
+  it("lanza error claro cuando no hay API Key ni Webhook configurado o cuando Gemini devuelve 429", async () => {
+    await expect(
+      generateSocialPostForBranch(
+        {
+          id: "suc-1",
+          nombre: "Marca X",
+          tono: "Corporativo",
+          reglas_negativas: "No usar barato",
+        },
+        mockAssets,
+        0,
+        {
+          apiKey: "",
+          webhookUrl: "",
+        },
+      ),
+    ).rejects.toThrow(/VITE_GEMINI_API_KEY/);
+
+    const mockFetch429 = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      json: async () => ({
+        error: {
+          status: "RESOURCE_EXHAUSTED",
+          message: "Quota exceeded for metric",
+        },
+      }),
+    });
+
+    await expect(
+      generateSocialPostForBranch(
+        {
+          id: "suc-1",
+          nombre: "Marca X",
+          tono: "Corporativo",
+          reglas_negativas: "No usar barato",
+        },
+        mockAssets,
+        0,
+        {
+          apiKey: "AIzaSy-rate-limited",
+          fetchFn: mockFetch429 as unknown as typeof fetch,
+        },
+      ),
+    ).rejects.toThrow(/429/);
+
+    expect(mockFetch429).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Generador Semanal de Prompts Visuales (mezcla de pilares, proporción y estilo)", () => {
+  it("reparte un lote de 5 piezas con la mezcla 40% Venta, 30% Educativo y 30% Estilo de vida", () => {
+    expect(WEEKLY_PILLAR_SHARES).toEqual({
+      VENTA: 40,
+      EDUCATIVO: 30,
+      ESTILO_DE_VIDA: 30,
+    });
+
+    const plan = calculateWeeklyBatchPlan({ count: 5, aspectRatio: "4:5" });
+
+    expect(plan).toHaveLength(5);
+    expect(plan.map((item) => item.index)).toEqual([0, 1, 2, 3, 4]);
+    expect(plan.every((item) => item.aspectRatio === "4:5")).toBe(true);
+
+    const counts = plan.reduce<Record<string, number>>((acc, item) => {
+      acc[item.pillar] = (acc[item.pillar] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    expect(counts).toEqual({ VENTA: 2, EDUCATIVO: 2, ESTILO_DE_VIDA: 1 });
+    expect(plan[0]?.sharePercent).toBe(40);
+
+    expect(
+      summarizeWeeklyBatchPlan(plan).map((item) => [item.pillar, item.count, item.sharePercent]),
+    ).toEqual([
+      ["VENTA", 2, 40],
+      ["EDUCATIVO", 2, 30],
+      ["ESTILO_DE_VIDA", 1, 30],
+    ]);
+  });
+
+  it("alterna los pilares para no agrupar el mismo tema en piezas consecutivas", () => {
+    const plan = calculateWeeklyBatchPlan({ count: 3 });
+    expect(plan.map((item) => item.pillar)).toEqual([
+      "VENTA",
+      "EDUCATIVO",
+      "ESTILO_DE_VIDA",
+    ]);
+    expect(plan.every((item) => item.sharePercent > 0)).toBe(true);
+  });
+
+  it("acota la cantidad al rango de 1 a 5 piezas y valida la proporción solicitada", () => {
+    expect(MAX_WEEKLY_IMAGE_COUNT).toBe(5);
+    expect(normalizeWeeklyImageCount(0)).toBe(1);
+    expect(normalizeWeeklyImageCount(99)).toBe(5);
+    expect(normalizeWeeklyImageCount(Number.NaN)).toBe(3);
+    expect(calculateWeeklyBatchPlan({ count: 0 })).toHaveLength(1);
+    expect(calculateWeeklyBatchPlan({ count: 99 })).toHaveLength(5);
+
+    expect(resolveWeeklyImageAspectRatio("9:16")).toBe("9:16");
+    expect(resolveWeeklyImageAspectRatio("16:9")).toBe(DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO);
+    expect(resolveWeeklyImageAspectRatio(undefined)).toBe("4:5");
+  });
+
+  it("traduce cada tono de marca en una guía de estilo fotográfico distinta", () => {
+    expect(describeToneVisualStyle("Cercano")).toContain("acogedora");
+    expect(describeToneVisualStyle("Profesional")).toContain("estudio");
+    expect(describeToneVisualStyle("Divertido")).toContain("energía");
+    expect(describeToneVisualStyle(undefined)).toContain("comercial");
   });
 });
