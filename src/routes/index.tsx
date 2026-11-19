@@ -71,7 +71,10 @@ import {
   isMissingPublishColumnsError,
   normalizePublishStatus,
 } from "@/lib/publish";
-import { publishPostServerFn } from "@/lib/publish-server";
+import {
+  getBranchMetaStatusServerFn,
+  publishPostServerFn,
+} from "@/lib/publish-server";
 import { normalizeSocialNetworkLabel } from "@/lib/security";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
@@ -149,11 +152,12 @@ function Dashboard() {
   const { session } = useAuthSession();
   const [posts, setPosts] = useState<PostData[]>([]);
   const [branchAssets, setBranchAssets] = useState<Asset[]>([]);
-  const [hasActiveIntegration, setHasActiveIntegration] = useState(true);
+  const [hasActiveIntegration, setHasActiveIntegration] = useState(false);
   const [isTokenExpired, setIsTokenExpired] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [publishingPostId, setPublishingPostId] = useState<string | null>(null);
+  const [markingPublishedId, setMarkingPublishedId] = useState<string | null>(null);
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
   const [editing, setEditing] = useState<EditingPostState | null>(null);
@@ -181,42 +185,49 @@ function Dashboard() {
           }),
         );
         setBranchAssets(sampleAssets);
-        setHasActiveIntegration(true);
+        setHasActiveIntegration(false);
         setIsTokenExpired(false);
         return;
       }
 
       setIsLoading(true);
       try {
-        const [extendedPostsRes, assetsRes, integrationsRes] = await Promise.all([
-          supabase
-            .from("publicaciones")
-            .select(
-              `
-              id, 
-              texto_copy, 
-              fecha_publicacion, 
-              red_social, 
-              estado, 
-              activo_id,
-              ultimo_error,
-              intentos,
-              publicado_en,
-              id_externo,
-              activos (url_imagen, tags)
-            `,
-            )
-            .eq("sucursal_id", sucursalActiva.id)
-            .order("created_at", { ascending: false }),
-          supabase
-            .from("activos")
-            .select("*")
-            .eq("sucursal_id", sucursalActiva.id),
-          supabase
-            .from("integraciones_sociales")
-            .select("*")
-            .eq("sucursal_id", sucursalActiva.id),
-        ]);
+        const [extendedPostsRes, assetsRes, integrationsRes, serverMetaStatus] =
+          await Promise.all([
+            supabase
+              .from("publicaciones")
+              .select(
+                `
+                id, 
+                texto_copy, 
+                fecha_publicacion, 
+                red_social, 
+                estado, 
+                activo_id,
+                ultimo_error,
+                intentos,
+                publicado_en,
+                id_externo,
+                activos (url_imagen, tags)
+              `,
+              )
+              .eq("sucursal_id", sucursalActiva.id)
+              .order("created_at", { ascending: false }),
+            supabase
+              .from("activos")
+              .select("*")
+              .eq("sucursal_id", sucursalActiva.id),
+            supabase
+              .from("integraciones_sociales")
+              .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
+              .eq("sucursal_id", sucursalActiva.id),
+            getBranchMetaStatusServerFn({
+              data: {
+                sucursalId: sucursalActiva.id,
+                accessToken: session?.access_token,
+              },
+            }).catch(() => null),
+          ]);
 
         let postsData = extendedPostsRes.data;
         let postsError = extendedPostsRes.error;
@@ -250,16 +261,18 @@ function Dashboard() {
           );
         }
 
-        if (integrationsRes.data) {
-          const connected = integrationsRes.data.some(
-            (i: any) =>
-              Boolean(i.token_cifrado) && !String(i.token_cifrado).startsWith("token_"),
-          );
+        if (serverMetaStatus) {
+          setHasActiveIntegration(serverMetaStatus.mode === "meta");
+          setIsTokenExpired(serverMetaStatus.hasExpiredToken);
+        } else if (integrationsRes.data) {
           const expired = integrationsRes.data.some((i: any) =>
             isIntegrationTokenExpired(i),
           );
-          setHasActiveIntegration(connected);
+          setHasActiveIntegration(false);
           setIsTokenExpired(expired);
+        } else {
+          setHasActiveIntegration(false);
+          setIsTokenExpired(false);
         }
 
         if (postsData && !postsError) {
@@ -555,6 +568,7 @@ function Dashboard() {
         data: {
           publicacionId: id,
           explicitRetry,
+          accessToken: session?.access_token,
         },
       });
 
@@ -631,6 +645,105 @@ function Dashboard() {
       toast.error(fallbackMsg);
     } finally {
       setPublishingPostId(null);
+    }
+  };
+
+  const handleMarkAsPublished = async (id: string) => {
+    const post = posts.find((p) => p.id === id);
+    if (!post) return;
+
+    const transition = canTransitionPublishStatus(post.status, "publicado", {
+      explicitManualConfirm: true,
+      hasExternalId: Boolean(post.externalId),
+    });
+    if (!transition.valid) {
+      toast.error(
+        transition.reason ?? "No se puede marcar como publicada en su estado actual.",
+      );
+      return;
+    }
+
+    const nowIso = new Date().toISOString();
+    setMarkingPublishedId(id);
+
+    if (!supabase) {
+      setPosts((ps) =>
+        ps.map((p) =>
+          p.id === id
+            ? { ...p, status: "publicado", publishedAtIso: nowIso, lastError: null }
+            : p,
+        ),
+      );
+      if (post.assetId) {
+        setBranchAssets((prev) =>
+          prev.map((a) =>
+            String(a.id) === post.assetId ? { ...a, uses: a.uses + 1 } : a,
+          ),
+        );
+      }
+      setMarkingPublishedId(null);
+      toast.success("Publicación marcada como publicada manualmente");
+      return;
+    }
+
+    try {
+      let { data, error } = await supabase
+        .from("publicaciones")
+        .update({
+          estado: "publicado",
+          publicado_en: nowIso,
+          ultimo_error: null,
+        })
+        .eq("id", id)
+        .select();
+
+      if (error && isMissingPublishColumnsError(error)) {
+        const fallback = await supabase
+          .from("publicaciones")
+          .update({ estado: "publicado" })
+          .eq("id", id)
+          .select();
+        data = fallback.data;
+        error = fallback.error;
+      }
+
+      if (error || !hasAffectedRows(data)) {
+        toast.error("No se pudo actualizar el estado de la publicación en Supabase.");
+        return;
+      }
+
+      if (post.assetId) {
+        const matchedAsset = branchAssets.find((a) => String(a.id) === post.assetId);
+        const nextUses = (matchedAsset?.uses ?? 0) + 1;
+        await supabase
+          .from("activos")
+          .update({ contador_uso: nextUses })
+          .eq("id", post.assetId);
+        setBranchAssets((prev) =>
+          prev.map((a) =>
+            String(a.id) === post.assetId ? { ...a, uses: nextUses } : a,
+          ),
+        );
+      }
+
+      setPosts((ps) =>
+        ps.map((p) =>
+          p.id === id
+            ? { ...p, status: "publicado", publishedAtIso: nowIso, lastError: null }
+            : p,
+        ),
+      );
+      toast.success("Publicación marcada como publicada manualmente");
+    } catch (error: unknown) {
+      console.error(error);
+      const errMessage = error instanceof Error ? error.message : null;
+      toast.error(
+        errMessage
+          ? `Error al marcar como publicada: ${errMessage}`
+          : "No se pudo marcar la publicación como publicada",
+      );
+    } finally {
+      setMarkingPublishedId(null);
     }
   };
 
@@ -900,13 +1013,13 @@ function Dashboard() {
       {!isLoading && !hasActiveIntegration && !isTokenExpired && (
         <Alert className="mb-5 rounded-xl">
           <Plug className="h-5 w-5" />
-          <AlertTitle>Publicación manual o vía Secret de Servidor</AlertTitle>
+          <AlertTitle>Modo Publicación Manual Asistida</AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
             <span>
-              Puedes publicar usando el secret <code>META_PAGE_ACCESS_TOKEN</code> del servidor o configurar los datos de la página en Ajustes.
+              Copia el texto, descarga la imagen optimizada y usa &quot;Marcar como publicado&quot; al subirla a tus redes. La conexión directa con Meta es opcional según el negocio.
             </span>
             <Button variant="outline" size="sm" asChild>
-              <Link to="/settings">Ir a Integraciones</Link>
+              <Link to="/settings">Ver Integraciones</Link>
             </Button>
           </AlertDescription>
         </Alert>
@@ -954,6 +1067,8 @@ function Dashboard() {
         {posts.map((p) => {
           const badge = getStatusBadgeProps(p.status);
           const isPublishingThis = publishingPostId === p.id || p.status === "publicando";
+          const isMarkingThis = markingPublishedId === p.id;
+          const isBusy = isPublishingThis || isMarkingThis;
           const articleClasses =
             p.status === "pendiente"
               ? "border border-warning bg-warning-soft"
@@ -1049,7 +1164,7 @@ function Dashboard() {
                   variant="ghost"
                   size="icon"
                   title="Eliminar publicación"
-                  disabled={deletingPostId === p.id || isPublishingThis}
+                  disabled={deletingPostId === p.id || isBusy}
                   onClick={() => handleDeletePost(p.id)}
                 >
                   {deletingPostId === p.id ? (
@@ -1060,43 +1175,89 @@ function Dashboard() {
                 </Button>
 
                 {p.status === "pendiente" && (
-                  <Button variant="brand" onClick={() => approve(p.id)}>
-                    <CheckCircle2 /> Aprobar y Programar
-                  </Button>
+                  <>
+                    <Button variant="brand" disabled={isBusy} onClick={() => approve(p.id)}>
+                      <CheckCircle2 /> Aprobar y Programar
+                    </Button>
+                    <Button
+                      variant="outline"
+                      disabled={isBusy}
+                      onClick={() => handleMarkAsPublished(p.id)}
+                    >
+                      {isMarkingThis ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <CheckCircle2 />
+                      )}
+                      {isMarkingThis ? "Guardando..." : "Marcar publicado"}
+                    </Button>
+                  </>
                 )}
 
                 {p.status === "programado" && (
-                  <Button
-                    variant="cta"
-                    disabled={isPublishingThis}
-                    onClick={() => handlePublishPost(p.id, { explicitRetry: false })}
-                  >
-                    {isPublishingThis ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <Send />
+                  <>
+                    {hasActiveIntegration && (
+                      <Button
+                        variant="cta"
+                        disabled={isBusy}
+                        onClick={() => handlePublishPost(p.id, { explicitRetry: false })}
+                      >
+                        {isPublishingThis ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <Send />
+                        )}
+                        {isPublishingThis ? "Publicando..." : "Publicar ahora (Meta)"}
+                      </Button>
                     )}
-                    {isPublishingThis ? "Publicando..." : "Publicar ahora"}
-                  </Button>
+                    <Button
+                      variant={hasActiveIntegration ? "outline" : "brand"}
+                      disabled={isBusy}
+                      onClick={() => handleMarkAsPublished(p.id)}
+                    >
+                      {isMarkingThis ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <CheckCircle2 />
+                      )}
+                      {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
+                    </Button>
+                  </>
                 )}
 
                 {p.status === "error" && (
-                  <Button
-                    variant="cta"
-                    disabled={isPublishingThis}
-                    onClick={() => handlePublishPost(p.id, { explicitRetry: true })}
-                  >
-                    {isPublishingThis ? (
-                      <Loader2 className="animate-spin" />
-                    ) : (
-                      <RotateCcw />
+                  <>
+                    {hasActiveIntegration && (
+                      <Button
+                        variant="cta"
+                        disabled={isBusy}
+                        onClick={() => handlePublishPost(p.id, { explicitRetry: true })}
+                      >
+                        {isPublishingThis ? (
+                          <Loader2 className="animate-spin" />
+                        ) : (
+                          <RotateCcw />
+                        )}
+                        Reintentar
+                      </Button>
                     )}
-                    Reintentar
-                  </Button>
+                    <Button
+                      variant={hasActiveIntegration ? "outline" : "brand"}
+                      disabled={isBusy}
+                      onClick={() => handleMarkAsPublished(p.id)}
+                    >
+                      {isMarkingThis ? (
+                        <Loader2 className="animate-spin" />
+                      ) : (
+                        <CheckCircle2 />
+                      )}
+                      {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
+                    </Button>
+                  </>
                 )}
 
                 {p.status !== "publicado" && p.status !== "publicando" && (
-                  <Button variant="outline" onClick={() => openEdit(p.id)}>
+                  <Button variant="outline" disabled={isBusy} onClick={() => openEdit(p.id)}>
                     <Pencil /> {p.status === "pendiente" ? "Editar" : "Reprogramar"}
                   </Button>
                 )}
