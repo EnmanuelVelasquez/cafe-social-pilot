@@ -10,6 +10,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -29,6 +38,8 @@ export function AuthScreen() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [fullName, setFullName] = useState("");
+  const [acceptedPrivacyPolicy, setAcceptedPrivacyPolicy] = useState(false);
+  const [isPrivacyDialogOpen, setIsPrivacyDialogOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
@@ -75,6 +86,7 @@ export function AuthScreen() {
       password,
       confirmPassword,
       fullName,
+      acceptedPrivacyPolicy,
       mode: "register",
     });
     if (!check.valid) {
@@ -307,6 +319,28 @@ export function AuthScreen() {
                     required
                   />
                 </div>
+                <div className="flex items-start gap-2.5 rounded-lg border bg-muted/40 p-3">
+                  <Checkbox
+                    id="register-privacy"
+                    checked={acceptedPrivacyPolicy}
+                    onCheckedChange={(checked) => setAcceptedPrivacyPolicy(checked === true)}
+                    className="mt-0.5"
+                  />
+                  <Label
+                    htmlFor="register-privacy"
+                    className="text-xs font-normal leading-relaxed text-muted-foreground"
+                  >
+                    Autorizo el tratamiento de mis datos personales conforme a la{" "}
+                    <button
+                      type="button"
+                      onClick={() => setIsPrivacyDialogOpen(true)}
+                      className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
+                    >
+                      Política de Privacidad (Ley 1581 de 2012)
+                    </button>
+                    .
+                  </Label>
+                </div>
                 <Button
                   type="submit"
                   variant="brand"
@@ -321,6 +355,46 @@ export function AuthScreen() {
           </Tabs>
         </CardContent>
       </Card>
+
+      <Dialog open={isPrivacyDialogOpen} onOpenChange={setIsPrivacyDialogOpen}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Tratamiento de Datos Personales (Ley 1581 de 2012)</DialogTitle>
+            <DialogDescription>
+              Información clara y transparente sobre cómo protegemos tus datos en AutoSocial AI.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              <strong className="text-foreground">Finalidad:</strong> tu correo electrónico y datos de marca
+              se utilizan exclusivamente para autenticar tu acceso, aislar tus sucursales y gestionar tus
+              publicaciones e imágenes.
+            </p>
+            <p>
+              <strong className="text-foreground">Seguridad y privacidad:</strong> la base de datos opera bajo
+              cifrado HTTPS, autenticación Supabase Auth y políticas Row Level Security (RLS) para que
+              ninguna otra cuenta pueda acceder a tus registros. No vendemos ni cedemos tus datos a terceros.
+            </p>
+            <p>
+              <strong className="text-foreground">Derechos del titular:</strong> puedes consultar, actualizar,
+              rectificar o solicitar la eliminación de tu información en cualquier momento conforme a la
+              Ley 1581 de 2012 (Habeas Data).
+            </p>
+          </div>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="brand"
+              onClick={() => {
+                setAcceptedPrivacyPolicy(true);
+                setIsPrivacyDialogOpen(false);
+              }}
+            >
+              Aceptar y cerrar
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

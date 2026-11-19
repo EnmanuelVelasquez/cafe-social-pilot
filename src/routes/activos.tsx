@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { useAuthSession } from "@/components/AuthGate";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -35,13 +36,15 @@ import {
   DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
   WEEKLY_IMAGE_ASPECT_RATIO_LABELS,
   WEEKLY_IMAGE_ASPECT_RATIOS,
-  analyzeAssetImageTags,
   calculateWeeklyBatchPlan,
-  generateWeeklyImagePromptsWithAI,
   summarizeWeeklyBatchPlan,
   type WeeklyImageAspectRatio,
   type WeeklyVisualPromptItem,
 } from "@/lib/ai-engine";
+import {
+  analyzeAssetTagsServerFn,
+  generateWeeklyPromptsServerFn,
+} from "@/lib/ai-server";
 import {
   BRAND_LOGO_TAG,
   BRAND_REFERENCE_TAG,
@@ -113,6 +116,7 @@ function mapRowToAsset(d: any, index: number): Asset {
 
 function Activos() {
   const { sucursalActiva } = useBranchStore();
+  const { session } = useAuthSession();
   const { prompts: openPromptsOnLoad } = Route.useSearch();
   const [assetsList, setAssetsList] = useState<Asset[]>([]);
   const [tag, setTag] = useState("Todos");
@@ -320,12 +324,19 @@ function Activos() {
     if (!editingTags || !sucursalActiva) return;
     setIsAnalyzingVision(true);
     try {
-      const { tags: detectedTags, source } = await analyzeAssetImageTags({
-        imageUrl: editingTags.img,
-        filename: editingTags.name,
-        branchName: sucursalActiva.nombre,
-        allowFilenameFallback: false,
+      const visionRes = await analyzeAssetTagsServerFn({
+        data: {
+          imageUrl: editingTags.img,
+          filename: editingTags.name,
+          branchName: sucursalActiva.nombre,
+          allowFilenameFallback: false,
+          accessToken: session?.access_token,
+        },
       });
+      if (!visionRes.ok) {
+        throw new Error(visionRes.errorMessage);
+      }
+      const { tags: detectedTags, source } = visionRes;
       const formatted = formatTagsString(detectedTags.join(", "));
       setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
       if (source === "gemini") {
@@ -529,18 +540,25 @@ function Activos() {
     setPromptItems([]);
 
     try {
-      const result = await generateWeeklyImagePromptsWithAI({
-        branch: {
-          nombre: sucursalActiva.nombre,
-          tono: sucursalActiva.tono,
-          reglas_negativas: sucursalActiva.reglas_negativas,
-          brand_kit: sucursalActiva.brand_kit,
+      const result = await generateWeeklyPromptsServerFn({
+        data: {
+          branch: {
+            nombre: sucursalActiva.nombre,
+            tono: sucursalActiva.tono,
+            reglas_negativas: sucursalActiva.reglas_negativas,
+            brand_kit: sucursalActiva.brand_kit,
+          },
+          count: promptCount,
+          aspectRatio: promptAspectRatio,
+          campaignContext: promptCampaign,
+          referenceImageUrls: brandReferenceAssets.map((asset) => asset.img),
+          accessToken: session?.access_token,
         },
-        count: promptCount,
-        aspectRatio: promptAspectRatio,
-        campaignContext: promptCampaign,
-        referenceImageUrls: brandReferenceAssets.map((asset) => asset.img),
       });
+
+      if (!result.ok) {
+        throw new Error(result.errorMessage);
+      }
 
       setPromptItems(result.items);
       setPromptMeta({

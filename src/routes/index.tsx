@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { useAuthSession } from "@/components/AuthGate";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,10 +42,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  generateSocialPostForBranch,
-  resolveInitialPostStatus,
-} from "@/lib/ai-engine";
+import { resolveInitialPostStatus } from "@/lib/ai-engine";
+import { generatePostServerFn } from "@/lib/ai-server";
 import {
   MAX_POST_COPY_LENGTH,
   SUPPORTED_SOCIAL_NETWORKS,
@@ -143,6 +142,7 @@ function getStatusBadgeProps(status: PublishStatus): {
 
 function Dashboard() {
   const { sucursalActiva } = useBranchStore();
+  const { session } = useAuthSession();
   const [posts, setPosts] = useState<PostData[]>([]);
   const [branchAssets, setBranchAssets] = useState<Asset[]>([]);
   const [hasActiveIntegration, setHasActiveIntegration] = useState(true);
@@ -306,12 +306,18 @@ function Dashboard() {
 
     setIsGenerating(true);
     try {
-      const { aiResponse, matchedAsset, provider } =
-        await generateSocialPostForBranch(
-          sucursalActiva,
-          branchAssets,
-          posts.length,
-        );
+      const generated = await generatePostServerFn({
+        data: {
+          branch: sucursalActiva,
+          assets: branchAssets,
+          variantIndex: posts.length,
+          accessToken: session?.access_token,
+        },
+      });
+      if (!generated.ok) {
+        throw new Error(generated.errorMessage);
+      }
+      const { aiResponse, matchedAsset, provider } = generated;
 
       const initialStatus = resolveInitialPostStatus(auto);
       const nextNetwork = posts.length % 2 === 0 ? "Instagram" : "Facebook";

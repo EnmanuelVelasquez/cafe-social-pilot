@@ -46,10 +46,25 @@ describe("Autenticación y aislamiento por usuario (Paso 4B)", () => {
 
     expect(
       validateAuthCredentials({
+        email: "usuario@cafe.com",
+        password: "Password123",
+        confirmPassword: "Password123",
+        acceptedPrivacyPolicy: false,
+        mode: "register",
+      }),
+    ).toMatchObject({
+      valid: false,
+      reason:
+        "Debes autorizar el tratamiento de datos personales (Ley 1581) para crear tu cuenta.",
+    });
+
+    expect(
+      validateAuthCredentials({
         email: "  Usuario@Cafe.com ",
         password: "Password123",
         confirmPassword: "Password123",
         fullName: "  Café Don Juan ",
+        acceptedPrivacyPolicy: true,
         mode: "register",
       }),
     ).toEqual({
