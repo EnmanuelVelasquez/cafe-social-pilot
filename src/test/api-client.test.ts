@@ -7,6 +7,7 @@ import {
   createPublicationViaApi,
   fetchPublicationsViaApi,
   resolveApiBaseUrl,
+  resolveGeminiProxyConfig,
 } from "@/lib/api-client";
 
 describe("Cliente de API formal (Render)", () => {
@@ -131,5 +132,15 @@ describe("Cliente de API formal (Render)", () => {
     });
     expect(pub).toEqual({ publicacion: { id: "p-2" } });
     expect(ApiRequestError).toBeDefined();
+  });
+
+  it("resuelve el proxy de Gemini sobre VITE_API_URL y adjunta el token JWT", () => {
+    expect(
+      resolveGeminiProxyConfig("jwt-user", "https://api-autosocial-ai.onrender.com/"),
+    ).toEqual({
+      endpointUrl: "https://api-autosocial-ai.onrender.com/api/ai/gemini",
+      accessToken: "jwt-user",
+    });
+    expect(resolveGeminiProxyConfig("jwt-user", "")).toBeUndefined();
   });
 });

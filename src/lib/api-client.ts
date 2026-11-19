@@ -1,3 +1,4 @@
+import type { GeminiProxyConfig } from "@/lib/ai-engine";
 import type { Activo } from "@/types";
 
 /** Tiempo de espera tolerante a cold-start en instancias gratuitas de Render. */
@@ -50,6 +51,22 @@ export function buildApiEndpointUrl(baseUrl: string, path: string): string {
   const cleanBase = baseUrl.replace(/\/+$/, "");
   const cleanPath = path.startsWith("/") ? path : `/${path}`;
   return `${cleanBase}${cleanPath}`;
+}
+
+/**
+ * Resuelve la configuración del proxy seguro de Gemini en Render (`/api/ai/gemini`)
+ * cuando `VITE_API_URL` está configurada, evitando depender de Server Functions de Vercel.
+ */
+export function resolveGeminiProxyConfig(
+  accessToken?: string | undefined,
+  baseUrlOverride?: string | undefined,
+): GeminiProxyConfig | undefined {
+  const baseUrl = resolveApiBaseUrl(baseUrlOverride);
+  if (!baseUrl) return undefined;
+  return {
+    endpointUrl: buildApiEndpointUrl(baseUrl, "/api/ai/gemini"),
+    accessToken,
+  };
 }
 
 /**

@@ -36,7 +36,9 @@ import {
   DEFAULT_WEEKLY_IMAGE_ASPECT_RATIO,
   WEEKLY_IMAGE_ASPECT_RATIO_LABELS,
   WEEKLY_IMAGE_ASPECT_RATIOS,
+  analyzeAssetImageTags,
   calculateWeeklyBatchPlan,
+  generateWeeklyImagePromptsWithAI,
   summarizeWeeklyBatchPlan,
   type WeeklyImageAspectRatio,
   type WeeklyVisualPromptItem,
@@ -45,6 +47,11 @@ import {
   analyzeAssetTagsServerFn,
   generateWeeklyPromptsServerFn,
 } from "@/lib/ai-server";
+import {
+  createAssetViaApi,
+  resolveApiBaseUrl,
+  resolveGeminiProxyConfig,
+} from "@/lib/api-client";
 import {
   BRAND_LOGO_TAG,
   BRAND_REFERENCE_TAG,
@@ -68,7 +75,6 @@ import {
   validateImageDimensions,
   type Asset,
 } from "@/lib/data";
-import { createAssetViaApi, resolveApiBaseUrl } from "@/lib/api-client";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 
@@ -324,19 +330,36 @@ function Activos() {
     if (!editingTags || !sucursalActiva) return;
     setIsAnalyzingVision(true);
     try {
-      const visionRes = await analyzeAssetTagsServerFn({
-        data: {
+      const proxy = resolveGeminiProxyConfig(session?.access_token);
+      let detectedTags: string[];
+      let source: string;
+
+      if (proxy) {
+        const directRes = await analyzeAssetImageTags({
           imageUrl: editingTags.img,
           filename: editingTags.name,
           branchName: sucursalActiva.nombre,
           allowFilenameFallback: false,
-          accessToken: session?.access_token,
-        },
-      });
-      if (!visionRes.ok) {
-        throw new Error(visionRes.errorMessage);
+          proxy,
+        });
+        detectedTags = directRes.tags;
+        source = directRes.source;
+      } else {
+        const visionRes = await analyzeAssetTagsServerFn({
+          data: {
+            imageUrl: editingTags.img,
+            filename: editingTags.name,
+            branchName: sucursalActiva.nombre,
+            allowFilenameFallback: false,
+            accessToken: session?.access_token,
+          },
+        });
+        if (!visionRes.ok) {
+          throw new Error(visionRes.errorMessage);
+        }
+        detectedTags = visionRes.tags;
+        source = visionRes.source;
       }
-      const { tags: detectedTags, source } = visionRes;
       const formatted = formatTagsString(detectedTags.join(", "));
       setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
       if (source === "gemini") {
@@ -540,8 +563,11 @@ function Activos() {
     setPromptItems([]);
 
     try {
-      const result = await generateWeeklyPromptsServerFn({
-        data: {
+      const proxy = resolveGeminiProxyConfig(session?.access_token);
+      let result: Awaited<ReturnType<typeof generateWeeklyImagePromptsWithAI>>;
+
+      if (proxy) {
+        result = await generateWeeklyImagePromptsWithAI({
           branch: {
             nombre: sucursalActiva.nombre,
             tono: sucursalActiva.tono,
@@ -552,12 +578,28 @@ function Activos() {
           aspectRatio: promptAspectRatio,
           campaignContext: promptCampaign,
           referenceImageUrls: brandReferenceAssets.map((asset) => asset.img),
-          accessToken: session?.access_token,
-        },
-      });
-
-      if (!result.ok) {
-        throw new Error(result.errorMessage);
+          proxy,
+        });
+      } else {
+        const serverRes = await generateWeeklyPromptsServerFn({
+          data: {
+            branch: {
+              nombre: sucursalActiva.nombre,
+              tono: sucursalActiva.tono,
+              reglas_negativas: sucursalActiva.reglas_negativas,
+              brand_kit: sucursalActiva.brand_kit,
+            },
+            count: promptCount,
+            aspectRatio: promptAspectRatio,
+            campaignContext: promptCampaign,
+            referenceImageUrls: brandReferenceAssets.map((asset) => asset.img),
+            accessToken: session?.access_token,
+          },
+        });
+        if (!serverRes.ok) {
+          throw new Error(serverRes.errorMessage);
+        }
+        result = serverRes;
       }
 
       setPromptItems(result.items);
