@@ -421,4 +421,90 @@ describe("Generador Semanal de Prompts Visuales (mezcla de pilares, proporción 
     expect(describeToneVisualStyle("Divertido")).toContain("energía");
     expect(describeToneVisualStyle(undefined)).toContain("comercial");
   });
+
+  it("envía generación de contenido a través del proxy seguro (Render) sin exponer API key en cliente", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      post_type: "FEED_SINGLE",
+                      copy_text: "Prueba nuestro café recién molido hoy ☕ #Cafe",
+                      recommended_visual_tags: ["origen"],
+                      call_to_action_used: true,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const result = await generateSocialPostForBranch(
+      {
+        id: "suc-1",
+        nombre: "Café Don Juan",
+        tono: "Cercano",
+        reglas_negativas: "Nunca usar barato",
+      },
+      mockAssets,
+      0,
+      {
+        apiKey: "",
+        proxy: {
+          endpointUrl: "https://api-autosocial-ai.onrender.com/api/ai/gemini",
+          accessToken: "jwt-session-123",
+        },
+        fetchFn: mockFetch as unknown as typeof fetch,
+      },
+    );
+
+    expect(result.provider).toBe("gemini");
+    expect(result.aiResponse.copy_text).toContain("café recién molido");
+    const [calledUrl, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toBe("https://api-autosocial-ai.onrender.com/api/ai/gemini");
+    expect(init.headers).toEqual({
+      "Content-Type": "application/json",
+      Authorization: "Bearer jwt-session-123",
+    });
+  });
+
+  it("falla rápido con estado 504 si la llamada al proveedor se aborta por timeout", async () => {
+    const abortErr = new Error("Aborted");
+    abortErr.name = "AbortError";
+    const mockFetch = vi.fn().mockRejectedValue(abortErr);
+
+    await expect(
+      generateSocialPostForBranch(
+        {
+          id: "suc-1",
+          nombre: "Café Don Juan",
+          tono: "Cercano",
+          reglas_negativas: "Nunca usar barato",
+        },
+        mockAssets,
+        0,
+        {
+          apiKey: "",
+          proxy: {
+            endpointUrl: "https://api-autosocial-ai.onrender.com/api/ai/gemini",
+            accessToken: "jwt-session-123",
+            timeoutMs: 100,
+          },
+          fetchFn: mockFetch as unknown as typeof fetch,
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "AIProviderHttpError",
+      status: 504,
+      code: "TIMEOUT",
+    });
+  });
 });

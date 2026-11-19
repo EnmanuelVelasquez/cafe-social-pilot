@@ -42,8 +42,12 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { resolveInitialPostStatus } from "@/lib/ai-engine";
+import {
+  generateSocialPostForBranch,
+  resolveInitialPostStatus,
+} from "@/lib/ai-engine";
 import { generatePostServerFn } from "@/lib/ai-server";
+import { resolveGeminiProxyConfig } from "@/lib/api-client";
 import {
   MAX_POST_COPY_LENGTH,
   SUPPORTED_SOCIAL_NETWORKS,
@@ -306,16 +310,31 @@ function Dashboard() {
 
     setIsGenerating(true);
     try {
-      const generated = await generatePostServerFn({
-        data: {
-          branch: sucursalActiva,
-          assets: branchAssets,
-          variantIndex: posts.length,
-          accessToken: session?.access_token,
-        },
-      });
-      if (!generated.ok) {
-        throw new Error(generated.errorMessage);
+      const proxy = resolveGeminiProxyConfig(session?.access_token);
+      let generated:
+        | Awaited<ReturnType<typeof generateSocialPostForBranch>>
+        | undefined;
+
+      if (proxy) {
+        generated = await generateSocialPostForBranch(
+          sucursalActiva,
+          branchAssets,
+          posts.length,
+          { proxy },
+        );
+      } else {
+        const serverRes = await generatePostServerFn({
+          data: {
+            branch: sucursalActiva,
+            assets: branchAssets,
+            variantIndex: posts.length,
+            accessToken: session?.access_token,
+          },
+        });
+        if (!serverRes.ok) {
+          throw new Error(serverRes.errorMessage);
+        }
+        generated = serverRes;
       }
       const { aiResponse, matchedAsset, provider } = generated;
 

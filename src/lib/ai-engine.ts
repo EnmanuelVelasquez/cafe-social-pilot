@@ -136,6 +136,44 @@ export class AIProviderHttpError extends Error {
   }
 }
 
+export interface GeminiProxyConfig {
+  endpointUrl: string;
+  accessToken?: string | undefined;
+  timeoutMs?: number | undefined;
+}
+
+export const DEFAULT_GEMINI_TIMEOUT_MS = 25_000;
+export const DEFAULT_PROXY_TIMEOUT_MS = 55_000;
+export const DEFAULT_IMAGE_FETCH_TIMEOUT_MS = 12_000;
+
+async function fetchWithTimeout(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+  timeoutContext: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new AIProviderHttpError(
+        `${timeoutContext} superó el tiempo máximo de espera (${Math.round(timeoutMs / 1000)} s).`,
+        504,
+        "TIMEOUT",
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export function buildGeminiEndpoint(model: string, apiKey: string): string {
   const safeModel = encodeURIComponent(resolveGeminiModel(model));
   const safeKey = encodeURIComponent(apiKey);
@@ -150,10 +188,14 @@ async function buildGeminiHttpError(
   let apiMessage: string | undefined;
   try {
     const errJson = (await response.json()) as {
-      error?: { status?: string; code?: number; message?: string };
+      error?: string | { status?: string; code?: number; message?: string };
     };
-    code = errJson?.error?.status;
-    apiMessage = errJson?.error?.message;
+    if (typeof errJson?.error === "string") {
+      apiMessage = errJson.error;
+    } else if (errJson?.error && typeof errJson.error === "object") {
+      code = errJson.error.status;
+      apiMessage = errJson.error.message;
+    }
   } catch {
     // Ignorar si el cuerpo de error no es JSON
   }
@@ -169,7 +211,7 @@ async function buildGeminiHttpError(
   if (response.status === 400 || response.status === 401 || response.status === 403) {
     const detail = apiMessage ? `: ${apiMessage}` : "";
     return new AIProviderHttpError(
-      `${contextLabel} respondió con estado ${response.status} (verifica tu VITE_GEMINI_API_KEY)${detail}`,
+      `${contextLabel} respondió con estado ${response.status} (verifica la configuración de Gemini/sesión)${detail}`,
       response.status,
       code,
     );
@@ -181,6 +223,63 @@ async function buildGeminiHttpError(
     response.status,
     code,
   );
+}
+
+async function invokeGeminiGenerateContent(params: {
+  model: string;
+  apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
+  body: Record<string, unknown>;
+  contextLabel: string;
+  fetchImpl: typeof fetch;
+}): Promise<string> {
+  const useProxy = Boolean(params.proxy?.endpointUrl?.trim());
+  const url = useProxy
+    ? params.proxy!.endpointUrl.trim()
+    : buildGeminiEndpoint(params.model, params.apiKey ?? "");
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  const token = params.proxy?.accessToken?.trim();
+  if (useProxy && token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  const requestBody = useProxy
+    ? { model: resolveGeminiModel(params.model), ...params.body }
+    : params.body;
+
+  const timeoutMs =
+    params.proxy?.timeoutMs ??
+    (useProxy ? DEFAULT_PROXY_TIMEOUT_MS : DEFAULT_GEMINI_TIMEOUT_MS);
+
+  const response = await fetchWithTimeout(
+    params.fetchImpl,
+    url,
+    {
+      method: "POST",
+      headers,
+      body: JSON.stringify(requestBody),
+    },
+    timeoutMs,
+    params.contextLabel,
+  );
+
+  if (!response.ok) {
+    throw await buildGeminiHttpError(response, params.contextLabel);
+  }
+
+  const payload = (await response.json()) as {
+    candidates?: Array<{
+      content?: { parts?: GeminiCandidatePart[] };
+    }>;
+  };
+  const content = extractGeminiResponseText(payload);
+  if (!content) {
+    throw new Error(`${params.contextLabel} devolvió una respuesta vacía.`);
+  }
+  return content;
 }
 
 function normalizeTag(tag: string): string {
@@ -242,7 +341,13 @@ export async function resolveImageToInlineData(
   }
 
   const fetchImpl = fetchFn ?? fetch;
-  const response = await fetchImpl(imageUrl);
+  const response = await fetchWithTimeout(
+    fetchImpl,
+    imageUrl,
+    {},
+    DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
+    "Descarga de imagen para visión",
+  );
   if (!response.ok) {
     throw new Error(`No se pudo descargar la imagen para análisis visual (${response.status})`);
   }
@@ -342,7 +447,8 @@ export function fileToDataUrl(file: Blob): Promise<string> {
  */
 export async function callGeminiVisionForTags(params: {
   imageUrl: string;
-  apiKey: string;
+  apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
   branchName?: string | undefined;
   model?: string | undefined;
   fetchFn?: typeof fetch | undefined;
@@ -350,15 +456,15 @@ export async function callGeminiVisionForTags(params: {
   const fetchImpl = params.fetchFn ?? fetch;
   const model = params.model || GEMINI_DEFAULT_MODEL;
   const inlineData = await resolveImageToInlineData(params.imageUrl, fetchImpl);
-  const endpoint = buildGeminiEndpoint(model, params.apiKey);
   const thinkingConfig = buildGeminiThinkingConfig(model);
 
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  const content = await invokeGeminiGenerateContent({
+    model,
+    apiKey: params.apiKey,
+    proxy: params.proxy,
+    contextLabel: "Gemini Vision",
+    fetchImpl,
+    body: {
       systemInstruction: {
         parts: [
           {
@@ -386,22 +492,8 @@ export async function callGeminiVisionForTags(params: {
         temperature: 0.2,
         ...(thinkingConfig ? { thinkingConfig } : {}),
       },
-    }),
+    },
   });
-
-  if (!response.ok) {
-    throw await buildGeminiHttpError(response, "Gemini Vision");
-  }
-
-  const payload = (await response.json()) as {
-    candidates?: Array<{
-      content?: { parts?: GeminiCandidatePart[] };
-    }>;
-  };
-  const content = extractGeminiResponseText(payload);
-  if (!content) {
-    throw new Error("Gemini Vision devolvió una respuesta vacía.");
-  }
 
   return parseAndValidateVisionTagsResponse(content);
 }
@@ -418,6 +510,7 @@ export async function analyzeAssetImageTags(options: {
   filename: string;
   branchName?: string | undefined;
   apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
   webhookUrl?: string | undefined;
   model?: string | undefined;
   allowFilenameFallback?: boolean | undefined;
@@ -428,6 +521,7 @@ export async function analyzeAssetImageTags(options: {
     (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
     ""
   ).trim();
+  const hasProxy = Boolean(options.proxy?.endpointUrl?.trim());
   const webhookUrl = (
     options.webhookUrl ??
     (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
@@ -440,10 +534,10 @@ export async function analyzeAssetImageTags(options: {
   const fetchImpl = options.fetchFn ?? fetch;
   const imageUrl = options.imageUrl?.trim();
 
-  if (!apiKey && !webhookUrl) {
+  if (!apiKey && !hasProxy && !webhookUrl) {
     if (!allowFallback) {
       throw new Error(
-        "No hay proveedor de visión configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+        "No hay proveedor de visión configurado. Define GEMINI_API_KEY en el servidor o VITE_API_URL (VITE_GEMINI_API_KEY solo en local).",
       );
     }
     return {
@@ -452,11 +546,12 @@ export async function analyzeAssetImageTags(options: {
     };
   }
 
-  if (apiKey && imageUrl) {
+  if ((apiKey || hasProxy) && imageUrl) {
     try {
       const tags = await callGeminiVisionForTags({
         imageUrl,
         apiKey,
+        proxy: options.proxy,
         branchName: options.branchName,
         model,
         fetchFn: fetchImpl,
@@ -666,21 +761,22 @@ export function buildPostGenerationUserPrompt(params: {
 export async function callGeminiForPost(params: {
   systemPrompt: string;
   userPrompt: string;
-  apiKey: string;
+  apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
   model?: string | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<unknown> {
   const fetchImpl = params.fetchFn ?? fetch;
   const model = params.model || GEMINI_DEFAULT_MODEL;
-  const endpoint = buildGeminiEndpoint(model, params.apiKey);
   const thinkingConfig = buildGeminiThinkingConfig(model);
 
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
+  return await invokeGeminiGenerateContent({
+    model,
+    apiKey: params.apiKey,
+    proxy: params.proxy,
+    contextLabel: "Gemini API",
+    fetchImpl,
+    body: {
       systemInstruction: {
         parts: [{ text: params.systemPrompt }],
       },
@@ -696,28 +792,13 @@ export async function callGeminiForPost(params: {
         temperature: 0.7,
         ...(thinkingConfig ? { thinkingConfig } : {}),
       },
-    }),
+    },
   });
-
-  if (!response.ok) {
-    throw await buildGeminiHttpError(response, "Gemini API");
-  }
-
-  const payload = (await response.json()) as {
-    candidates?: Array<{
-      content?: { parts?: GeminiCandidatePart[] };
-    }>;
-  };
-  const content = extractGeminiResponseText(payload);
-  if (!content) {
-    throw new Error("Gemini API devolvió una respuesta vacía.");
-  }
-
-  return content;
 }
 
 export interface GeneratePostOptions {
   apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
   webhookUrl?: string | undefined;
   model?: string | undefined;
   pillars?: Pillar[] | undefined;
@@ -726,7 +807,7 @@ export interface GeneratePostOptions {
 
 /**
  * Orquestador del Motor IA (REQ-1.2 + REQ-3.1 + REQ-3.2 + Riesgo 2):
- * Exige un proveedor IA real (`VITE_GEMINI_API_KEY` o `VITE_AI_WEBHOOK_URL`),
+ * Exige un proveedor IA real (`VITE_GEMINI_API_KEY`, proxy seguro o `VITE_AI_WEBHOOK_URL`),
  * valida el contrato JSON con hasta 2 reintentos y cruza el activo óptimo.
  */
 export async function generateSocialPostForBranch(
@@ -749,6 +830,7 @@ export async function generateSocialPostForBranch(
     (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
     ""
   ).trim();
+  const hasProxy = Boolean(options?.proxy?.endpointUrl?.trim());
   const webhookUrl = (
     options?.webhookUrl ??
     (import.meta.env["VITE_AI_WEBHOOK_URL"] as string | undefined) ??
@@ -759,9 +841,9 @@ export async function generateSocialPostForBranch(
   );
   const fetchImpl = options?.fetchFn ?? fetch;
 
-  if (!apiKey && !webhookUrl) {
+  if (!apiKey && !hasProxy && !webhookUrl) {
     throw new Error(
-      "No hay un proveedor de IA configurado. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+      "No hay un proveedor de IA configurado. Define VITE_API_URL o GEMINI_API_KEY en el servidor (VITE_GEMINI_API_KEY en local).",
     );
   }
 
@@ -773,14 +855,15 @@ export async function generateSocialPostForBranch(
     variantIndex,
   });
 
-  const provider: AIProviderSource = apiKey ? "gemini" : "webhook";
+  const provider: AIProviderSource = apiKey || hasProxy ? "gemini" : "webhook";
 
   const aiResponse = await generateWithRetry(async () => {
-    if (apiKey) {
+    if (apiKey || hasProxy) {
       return callGeminiForPost({
         systemPrompt,
         userPrompt,
         apiKey,
+        proxy: options?.proxy,
         model,
         fetchFn: fetchImpl,
       });
@@ -1309,7 +1392,13 @@ async function fetchImageAsInlineData(
   fetchImpl: typeof fetch,
 ): Promise<{ mimeType: string; data: string } | null> {
   try {
-    const response = await fetchImpl(url);
+    const response = await fetchWithTimeout(
+      fetchImpl,
+      url,
+      {},
+      DEFAULT_IMAGE_FETCH_TIMEOUT_MS,
+      "Descarga de referencia visual",
+    );
     if (!response.ok) return null;
     const blob = await response.blob();
     const mimeType =
@@ -1357,6 +1446,7 @@ export interface GenerateWeeklyPromptsParams {
   campaignContext?: string | undefined;
   referenceImageUrls?: string[] | undefined;
   apiKey?: string | undefined;
+  proxy?: GeminiProxyConfig | undefined;
   model?: string | undefined;
   fetchFn?: typeof fetch | undefined;
 }
@@ -1383,9 +1473,10 @@ export async function generateWeeklyImagePromptsWithAI(
     (import.meta.env["VITE_GEMINI_API_KEY"] as string | undefined) ??
     ""
   ).trim();
-  if (!apiKey) {
+  const hasProxy = Boolean(params.proxy?.endpointUrl?.trim());
+  if (!apiKey && !hasProxy) {
     throw new Error(
-      "No hay API Key de Gemini configurada para generar prompts visuales. Define VITE_GEMINI_API_KEY en las variables de entorno.",
+      "No hay API Key de Gemini configurada para generar prompts visuales. Define VITE_API_URL o GEMINI_API_KEY en el servidor.",
     );
   }
 
@@ -1412,14 +1503,16 @@ export async function generateWeeklyImagePromptsWithAI(
   });
 
   const thinkingConfig = buildGeminiThinkingConfig(model);
-  const endpoint = buildGeminiEndpoint(model, apiKey);
 
   const items = await retryUntilValid(
     async () => {
-      const response = await fetchImpl(endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      return await invokeGeminiGenerateContent({
+        model,
+        apiKey,
+        proxy: params.proxy,
+        contextLabel: "Gemini Prompts",
+        fetchImpl,
+        body: {
           systemInstruction: {
             parts: [{ text: request.systemPrompt }],
           },
@@ -1440,21 +1533,8 @@ export async function generateWeeklyImagePromptsWithAI(
             temperature: 0.8,
             ...(thinkingConfig ? { thinkingConfig } : {}),
           },
-        }),
+        },
       });
-
-      if (!response.ok) {
-        throw await buildGeminiHttpError(response, "Gemini Prompts");
-      }
-
-      const payload = (await response.json()) as {
-        candidates?: Array<{ content?: { parts?: GeminiCandidatePart[] } }>;
-      };
-      const content = extractGeminiResponseText(payload);
-      if (!content) {
-        throw new Error("Gemini Prompts devolvió una respuesta vacía.");
-      }
-      return content;
     },
     parseAndValidateWeeklyPromptsResponse,
   );
