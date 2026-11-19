@@ -142,6 +142,7 @@ function Activos() {
   );
   const [promptCampaign, setPromptCampaign] = useState("");
   const [isGeneratingPrompts, setIsGeneratingPrompts] = useState(false);
+  const isGeneratingPromptsRef = useRef(false);
   const [promptItems, setPromptItems] = useState<WeeklyVisualPromptItem[]>([]);
   const [promptMeta, setPromptMeta] = useState<{
     model: string;
@@ -557,8 +558,9 @@ function Activos() {
   };
 
   const handleGeneratePrompts = async () => {
-    if (!sucursalActiva) return;
+    if (!sucursalActiva || isGeneratingPromptsRef.current) return;
 
+    isGeneratingPromptsRef.current = true;
     setIsGeneratingPrompts(true);
     setPromptItems([]);
 
@@ -617,6 +619,7 @@ function Activos() {
           : "No se pudieron generar los prompts visuales",
       );
     } finally {
+      isGeneratingPromptsRef.current = false;
       setIsGeneratingPrompts(false);
     }
   };
