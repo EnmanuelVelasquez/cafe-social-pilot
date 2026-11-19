@@ -11,6 +11,7 @@ export interface AuthCredentialsValidationInput {
   mode: "login" | "register";
   confirmPassword?: string | undefined;
   fullName?: string | undefined;
+  acceptedPrivacyPolicy?: boolean | undefined;
 }
 
 export interface AuthCredentialsValidationResult {
@@ -65,6 +66,16 @@ export function validateAuthCredentials(
       normalizedEmail,
       normalizedName,
       reason: "Las contraseñas no coinciden.",
+    };
+  }
+
+  if (input.mode === "register" && input.acceptedPrivacyPolicy !== true) {
+    return {
+      valid: false,
+      normalizedEmail,
+      normalizedName,
+      reason:
+        "Debes autorizar el tratamiento de datos personales (Ley 1581) para crear tu cuenta.",
     };
   }
 

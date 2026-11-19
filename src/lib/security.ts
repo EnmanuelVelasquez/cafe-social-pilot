@@ -3,23 +3,40 @@ export type CronAuthorizationResult =
   | { authorized: false; status: 401 | 503; error: string };
 
 /**
+ * Lee una variable de entorno del servidor (envOverride, `__env__` de Nitro o `process.env`).
+ */
+export function readServerEnv(
+  key: string,
+  envOverride?: Record<string, unknown>,
+): string | undefined {
+  if (envOverride && typeof envOverride[key] === "string" && envOverride[key]) {
+    const trimmed = (envOverride[key] as string).trim();
+    if (trimmed) return trimmed;
+  }
+  const globalEnv = (globalThis as Record<string, unknown>)["__env__"];
+  if (
+    globalEnv &&
+    typeof globalEnv === "object" &&
+    typeof (globalEnv as Record<string, unknown>)[key] === "string"
+  ) {
+    const val = ((globalEnv as Record<string, unknown>)[key] as string).trim();
+    if (val) return val;
+  }
+  if (typeof process !== "undefined" && process.env && typeof process.env[key] === "string") {
+    const val = process.env[key]?.trim();
+    if (val) return val;
+  }
+  return undefined;
+}
+
+/**
  * Lee el secreto configurado para proteger el endpoint `/api/cron/publish-due`.
  * Prioriza el objeto `env` inyectado por el runtime (Nitro/Cloudflare/Vercel) y cae a `process.env`.
  */
 export function resolveConfiguredCronSecret(
   envRecord?: Record<string, unknown>,
 ): string | undefined {
-  const fromEnvRecord =
-    envRecord && typeof envRecord["CRON_SECRET"] === "string"
-      ? envRecord["CRON_SECRET"].trim()
-      : "";
-  if (fromEnvRecord) return fromEnvRecord;
-
-  const fromProcess =
-    typeof process !== "undefined" && typeof process.env?.["CRON_SECRET"] === "string"
-      ? process.env["CRON_SECRET"].trim()
-      : "";
-  return fromProcess || undefined;
+  return readServerEnv("CRON_SECRET", envRecord);
 }
 
 /**
