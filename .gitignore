@@ -1,3 +1,11 @@
+# Environment variables (usa .env.local para claves privadas en desarrollo)
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.test
+.env.secret*
+
 # Logs
 logs
 *.log

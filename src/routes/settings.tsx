@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { Plus, Save, Plug, Instagram, Facebook, CheckCircle2, Trash2, Loader2, TriangleAlert, Palette } from "lucide-react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/AppShell";
+import { useAuthSession } from "@/components/AuthGate";
+import { ensureUserPerfil } from "@/lib/auth";
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -60,6 +62,7 @@ const BRAND_COLOR_FIELDS = [
 
 function Settings() {
   const { sucursales, sucursalActiva, setSucursales, setSucursalActiva, removeSucursal } = useBranchStore();
+  const { user } = useAuthSession();
 
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
@@ -305,6 +308,9 @@ function Settings() {
 
     try {
       let perfilId = sucursalActiva?.perfil_id ?? sucursales[0]?.perfil_id;
+      if (!perfilId && user) {
+        perfilId = (await ensureUserPerfil(supabase, user)) ?? undefined;
+      }
       if (!perfilId) {
         const { data: perfiles } = await supabase.from("perfiles").select("id").limit(1);
         perfilId = perfiles?.[0]?.id;

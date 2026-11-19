@@ -65,6 +65,7 @@ import {
   validateImageDimensions,
   type Asset,
 } from "@/lib/data";
+import { createAssetViaApi, resolveApiBaseUrl } from "@/lib/api-client";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 
@@ -253,21 +254,45 @@ function Activos() {
       } = supabase.storage.from("galeria").getPublicUrl(fileName);
 
       const autoTags = formatTagsString(inferTagsFromFilename(file.name).join(", "));
+      const apiBaseUrl = resolveApiBaseUrl();
+      let inserted: unknown = null;
 
-      const { data: inserted, error: insertError } = await supabase
-        .from("activos")
-        .insert([
-          {
-            sucursal_id: sucursalActiva.id,
-            url_imagen: publicUrl,
+      if (apiBaseUrl) {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        try {
+          inserted = await createAssetViaApi({
+            sucursalId: sucursalActiva.id,
+            urlImagen: publicUrl,
             tags: autoTags,
-            contador_uso: 0,
-          },
-        ])
-        .select()
-        .single();
+            accessToken: session?.access_token,
+            baseUrl: apiBaseUrl,
+          });
+        } catch (apiError) {
+          await supabase.storage.from("galeria").remove([fileName]);
+          throw apiError;
+        }
+      } else {
+        const { data: dbInserted, error: insertError } = await supabase
+          .from("activos")
+          .insert([
+            {
+              sucursal_id: sucursalActiva.id,
+              url_imagen: publicUrl,
+              tags: autoTags,
+              contador_uso: 0,
+            },
+          ])
+          .select()
+          .single();
 
-      if (insertError) throw insertError;
+        if (insertError) {
+          await supabase.storage.from("galeria").remove([fileName]);
+          throw insertError;
+        }
+        inserted = dbInserted;
+      }
 
       if (inserted) {
         setAssetsList((prev) => [mapRowToAsset(inserted, 0), ...prev]);

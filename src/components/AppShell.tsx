@@ -1,7 +1,9 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, Sparkles, Images, Zap, Settings, Store } from "lucide-react";
+import { LayoutDashboard, Sparkles, Images, Zap, Settings, Store, LogOut } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
+import { useAuthSession } from "@/components/AuthGate";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { sampleBranches } from "@/lib/data";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
@@ -16,6 +18,7 @@ const nav = [
 
 export function AppShell({ title, subtitle, action, children }: { title: ReactNode; subtitle: string; action?: ReactNode; children: ReactNode }) {
   const { sucursales, sucursalActiva, setSucursales, setSucursalActiva } = useBranchStore();
+  const { user, signOut } = useAuthSession();
 
   useEffect(() => {
     if (sucursales.length > 0) return;
@@ -41,7 +44,13 @@ export function AppShell({ title, subtitle, action, children }: { title: ReactNo
     return () => {
       active = false;
     };
-  }, [sucursales.length, setSucursales, setSucursalActiva]);
+  }, [sucursales.length, setSucursales, setSucursalActiva, user?.id]);
+
+  const userInitials = (
+    user?.email?.slice(0, 2) ||
+    sucursalActiva?.nombre?.slice(0, 2) ||
+    "AS"
+  ).toUpperCase();
 
   return (
     <div className="min-h-screen bg-background pb-20 md:pb-0 md:pl-64">
@@ -54,13 +63,46 @@ export function AppShell({ title, subtitle, action, children }: { title: ReactNo
             </Link>
           ))}
         </nav>
-        <div className="mt-auto flex items-center gap-3 rounded-xl border p-3">
-          <div className="grid h-9 w-9 place-items-center rounded-full bg-brand text-sm font-bold text-primary-foreground">CJ</div>
-          <div className="min-w-0"><p className="truncate text-sm font-semibold">{sucursalActiva?.nombre ?? "Café Don Juan"}</p><p className="text-xs text-muted-foreground">Plan Agencia</p></div>
+        <div className="mt-auto space-y-2">
+          <div className="flex items-center gap-3 rounded-xl border p-3">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand text-sm font-bold text-primary-foreground">
+              {userInitials}
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold">{sucursalActiva?.nombre ?? "Sin sucursal"}</p>
+              <p className="truncate text-xs text-muted-foreground">{user?.email ?? "Modo Demo"}</p>
+            </div>
+          </div>
+          {user && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="w-full justify-start text-muted-foreground hover:text-foreground"
+              onClick={() => {
+                void signOut();
+              }}
+            >
+              <LogOut className="h-4 w-4" /> Cerrar sesión
+            </Button>
+          )}
         </div>
       </aside>
       <header className="sticky top-0 z-20 flex items-center justify-between gap-2 border-b bg-card/90 px-4 py-3 backdrop-blur md:hidden">
         <Brand />
+        {user && (
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              void signOut();
+            }}
+            aria-label="Cerrar sesión"
+          >
+            <LogOut className="h-4 w-4" /> Salir
+          </Button>
+        )}
       </header>
       <main className="mx-auto max-w-6xl px-4 py-6 md:px-8 md:py-10">
         <div className="mb-6 grid gap-4 sm:flex sm:items-end sm:justify-between">

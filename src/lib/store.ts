@@ -32,6 +32,7 @@ export interface BranchState {
   setSucursales: (sucursales: Sucursal[]) => void;
   setSucursalActiva: (sucursalActiva: Sucursal | null) => void;
   removeSucursal: (deletedId: string) => void;
+  resetBranches: () => void;
 }
 
 export const useBranchStore = create<BranchState>()((set) => ({
@@ -47,4 +48,5 @@ export const useBranchStore = create<BranchState>()((set) => ({
         state.sucursalActiva,
       ),
     ),
+  resetBranches: () => set({ sucursales: [], sucursalActiva: null }),
 }));
