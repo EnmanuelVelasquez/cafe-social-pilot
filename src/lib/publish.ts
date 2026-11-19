@@ -37,7 +37,8 @@ export type PublishTransitionTrigger =
   | "succeed"
   | "fail"
   | "retry_manual"
-  | "retry_backoff";
+  | "retry_backoff"
+  | "manual_publish";
 
 export interface StateTransitionResult {
   valid: boolean;
@@ -79,6 +80,7 @@ export function normalizePublishStatus(raw: string | null | undefined): PublishS
  * - `programado -> publicando` (bloqueado si ya existe `id_externo`)
  * - `publicando -> publicado | error`
  * - `error -> programado` (solo con `explicitRetry: true`)
+ * - `pendiente | programado | error -> publicado` (solo con `explicitManualConfirm: true`)
  * - `publicado` es terminal e inmutable.
  */
 export function canTransitionPublishStatus(
@@ -86,6 +88,7 @@ export function canTransitionPublishStatus(
   to: PublishStatus,
   options?: {
     explicitRetry?: boolean | undefined;
+    explicitManualConfirm?: boolean | undefined;
     hasExternalId?: boolean | undefined;
   },
 ): StateTransitionResult {
@@ -106,6 +109,18 @@ export function canTransitionPublishStatus(
       from,
       to,
       reason: "La publicación ya tiene un id_externo registrado en Meta (idempotencia).",
+    };
+  }
+
+  if (options?.explicitManualConfirm === true && to === "publicado") {
+    if (from === "pendiente" || from === "programado" || from === "error") {
+      return { valid: true, from, to };
+    }
+    return {
+      valid: false,
+      from,
+      to,
+      reason: "No se puede confirmar manualmente mientras la publicación está enviándose.",
     };
   }
 
@@ -599,6 +614,74 @@ export function isIntegrationTokenExpired(
   const expiresMs = new Date(integration.token_expira_en).getTime();
   if (Number.isNaN(expiresMs)) return false;
   return expiresMs <= now.getTime();
+}
+
+export type BranchPublishMode = "meta" | "manual";
+
+export interface BranchMetaCapability {
+  mode: BranchPublishMode;
+  hasExpiredToken: boolean;
+  hasOwnToken: boolean;
+  usesPilotServerEnv: boolean;
+}
+
+/**
+ * Política fail-closed para multi-tenant: solo autoriza el fallback a credenciales
+ * globales de servidor (`META_PAGE_ACCESS_TOKEN`, `META_PAGE_ID`, `META_IG_USER_ID`)
+ * cuando `META_PILOT_BRANCH_ID` incluye explícitamente el identificador de esta sucursal.
+ */
+export function isBranchAuthorizedForServerMetaEnv(
+  sucursalId: string | null | undefined,
+  allowedPilotBranchIdsRaw?: string | null | undefined,
+): boolean {
+  const targetId = (sucursalId ?? "").trim();
+  if (!targetId) return false;
+
+  const allowList = (allowedPilotBranchIdsRaw ?? "")
+    .split(/[,\s]+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (allowList.length === 0) return false;
+  return allowList.includes(targetId);
+}
+
+/**
+ * Determina si una sucursal tiene publicación automática directa vía Meta Graph API
+ * o si debe operar en modo Publicación Manual Asistida.
+ */
+export function resolveBranchPublishMode(options: {
+  integrations: ReadonlyArray<{
+    plataforma?: string | null | undefined;
+    token_cifrado?: string | null | undefined;
+    token_expira_en?: string | null | undefined;
+  }>;
+  pilotServerEnvEnabled?: boolean | undefined;
+  now?: Date | undefined;
+}): BranchMetaCapability {
+  const now = options.now ?? new Date();
+  const metaRecord =
+    options.integrations.find((item) => item.plataforma === "Instagram_Graph_API") ??
+    options.integrations[0];
+
+  const rawToken = metaRecord?.token_cifrado?.trim() ?? "";
+  const hasRealBranchToken =
+    rawToken.length > 0 && !rawToken.toLowerCase().startsWith("token_");
+  const recordExpired = isIntegrationTokenExpired(metaRecord, now);
+  const pilotActive = options.pilotServerEnvEnabled === true;
+
+  const hasOwnToken = hasRealBranchToken && !recordExpired;
+  const usesPilotServerEnv = !hasOwnToken && pilotActive;
+  const hasExpiredToken = recordExpired && !pilotActive;
+  const mode: BranchPublishMode =
+    hasOwnToken || usesPilotServerEnv ? "meta" : "manual";
+
+  return {
+    mode,
+    hasExpiredToken,
+    hasOwnToken,
+    usesPilotServerEnv,
+  };
 }
 
 /**

@@ -9,12 +9,14 @@ import {
   classifyMetaGraphError,
   computeRetryBackoff,
   filterDueScheduledPosts,
+  isBranchAuthorizedForServerMetaEnv,
   isIdempotentSkip,
   isIntegrationTokenExpired,
   isMissingPublishColumnsError,
   normalizePublishStatus,
   publishToFacebookPage,
   publishToInstagramFeed,
+  resolveBranchPublishMode,
   resolveMetaAccountCredentials,
   sanitizeMetaAccessToken,
 } from "@/lib/publish";
@@ -546,5 +548,138 @@ describe("Etapa 4 · Flujo HTTP de Meta Graph API (Instagram y Facebook con fetc
 
     expect(result).toEqual({ externalId: "page-999_post-222" });
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("Publicación Manual Asistida y aislamiento del piloto Meta", () => {
+  it("permite confirmar manualmente pendiente/programado/error -> publicado solo con explicitManualConfirm=true", () => {
+    expect(
+      canTransitionPublishStatus("pendiente", "publicado", {
+        explicitManualConfirm: true,
+      }).valid,
+    ).toBe(true);
+    expect(
+      canTransitionPublishStatus("programado", "publicado", {
+        explicitManualConfirm: true,
+      }).valid,
+    ).toBe(true);
+    expect(
+      canTransitionPublishStatus("error", "publicado", {
+        explicitManualConfirm: true,
+      }).valid,
+    ).toBe(true);
+
+    // Mantiene protegida una publicación en tránsito o ya publicada
+    expect(
+      canTransitionPublishStatus("publicando", "publicado", {
+        explicitManualConfirm: true,
+      }).valid,
+    ).toBe(false);
+    expect(
+      canTransitionPublishStatus("publicado", "publicado", {
+        explicitManualConfirm: true,
+      }).valid,
+    ).toBe(false);
+  });
+
+  it("aplica fail-closed al fallback global de Meta y solo autoriza sucursales listadas en META_PILOT_BRANCH_ID", () => {
+    expect(isBranchAuthorizedForServerMetaEnv("branch-pilot-1", undefined)).toBe(false);
+    expect(isBranchAuthorizedForServerMetaEnv("branch-pilot-1", "   ")).toBe(false);
+    expect(isBranchAuthorizedForServerMetaEnv("", "branch-pilot-1")).toBe(false);
+
+    expect(
+      isBranchAuthorizedForServerMetaEnv(
+        "branch-pilot-1",
+        "branch-pilot-1, branch-pilot-2",
+      ),
+    ).toBe(true);
+    expect(
+      isBranchAuthorizedForServerMetaEnv(
+        "branch-other-client",
+        "branch-pilot-1, branch-pilot-2",
+      ),
+    ).toBe(false);
+  });
+
+  it("resuelve modo 'manual' por defecto y 'meta' solo con token propio o sucursal piloto autorizada", () => {
+    const now = new Date("2026-11-19T15:00:00.000Z");
+
+    expect(
+      resolveBranchPublishMode({
+        integrations: [],
+        pilotServerEnvEnabled: false,
+        now,
+      }),
+    ).toEqual({
+      mode: "manual",
+      hasExpiredToken: false,
+      hasOwnToken: false,
+      usesPilotServerEnv: false,
+    });
+
+    // Placeholders tipo token_ no habilitan publicación automática
+    expect(
+      resolveBranchPublishMode({
+        integrations: [
+          { plataforma: "Instagram_Graph_API", token_cifrado: "token_placeholder_123" },
+        ],
+        pilotServerEnvEnabled: false,
+        now,
+      }).mode,
+    ).toBe("manual");
+
+    // Piloto autorizado por servidor -> modo Meta aunque token_cifrado en BD sea null
+    expect(
+      resolveBranchPublishMode({
+        integrations: [{ plataforma: "Instagram_Graph_API", token_cifrado: null }],
+        pilotServerEnvEnabled: true,
+        now,
+      }),
+    ).toEqual({
+      mode: "meta",
+      hasExpiredToken: false,
+      hasOwnToken: false,
+      usesPilotServerEnv: true,
+    });
+
+    // Token propio vigente habilita modo Meta
+    expect(
+      resolveBranchPublishMode({
+        integrations: [
+          {
+            plataforma: "Instagram_Graph_API",
+            token_cifrado: "EAAGrealToken123456",
+            token_expira_en: "2026-12-19T15:00:00.000Z",
+          },
+        ],
+        pilotServerEnvEnabled: false,
+        now,
+      }),
+    ).toEqual({
+      mode: "meta",
+      hasExpiredToken: false,
+      hasOwnToken: true,
+      usesPilotServerEnv: false,
+    });
+
+    // Token propio expirado vuelve a manual y marca hasExpiredToken
+    expect(
+      resolveBranchPublishMode({
+        integrations: [
+          {
+            plataforma: "Instagram_Graph_API",
+            token_cifrado: "EAAGrealToken123456",
+            token_expira_en: "2026-11-18T15:00:00.000Z",
+          },
+        ],
+        pilotServerEnvEnabled: false,
+        now,
+      }),
+    ).toEqual({
+      mode: "manual",
+      hasExpiredToken: true,
+      hasOwnToken: false,
+      usesPilotServerEnv: false,
+    });
   });
 });

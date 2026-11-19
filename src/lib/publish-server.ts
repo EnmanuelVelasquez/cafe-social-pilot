@@ -1,18 +1,21 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createServerFn } from "@tanstack/react-start";
 import {
+  type BranchMetaCapability,
   MetaGraphApiError,
   canTransitionPublishStatus,
   checkInstagramDailyQuota,
   classifyMetaGraphError,
   computeRetryBackoff,
   filterDueScheduledPosts,
+  isBranchAuthorizedForServerMetaEnv,
   isIdempotentSkip,
   isIntegrationTokenExpired,
   isMissingPublishColumnsError,
   normalizePublishStatus,
   publishToFacebookPage,
   publishToInstagramFeed,
+  resolveBranchPublishMode,
   resolveMetaAccountCredentials,
   sanitizeMetaAccessToken,
 } from "@/lib/publish";
@@ -22,6 +25,7 @@ export interface PublishPostInput {
   publicacionId: string;
   explicitRetry?: boolean | undefined;
   fromCron?: boolean | undefined;
+  accessToken?: string | undefined;
 }
 
 export interface PublishPostResult {
@@ -73,14 +77,16 @@ function readServerEnv(
 
 function createServerSupabaseClient(
   envOverride?: Record<string, unknown>,
+  userAccessToken?: string | undefined,
 ): SupabaseClient {
   const supabaseUrl =
     readServerEnv("SUPABASE_URL", envOverride) ??
     readServerEnv("VITE_SUPABASE_URL", envOverride) ??
     (typeof import.meta !== "undefined" ? import.meta.env?.["VITE_SUPABASE_URL"] : undefined);
 
+  const serviceRoleKey = readServerEnv("SUPABASE_SERVICE_ROLE_KEY", envOverride);
   const supabaseKey =
-    readServerEnv("SUPABASE_SERVICE_ROLE_KEY", envOverride) ??
+    serviceRoleKey ??
     readServerEnv("SUPABASE_ANON_KEY", envOverride) ??
     readServerEnv("VITE_SUPABASE_PUBLISHABLE_KEY", envOverride) ??
     readServerEnv("VITE_SUPABASE_ANON_KEY", envOverride) ??
@@ -95,12 +101,56 @@ function createServerSupabaseClient(
     );
   }
 
+  const trimmedToken = userAccessToken?.trim();
+  const useUserJwt = !serviceRoleKey && Boolean(trimmedToken);
+
   return createClient(supabaseUrl, supabaseKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
     },
+    ...(useUserJwt
+      ? {
+          global: {
+            headers: {
+              Authorization: `Bearer ${trimmedToken}`,
+            },
+          },
+        }
+      : {}),
   });
+}
+
+function resolveBranchMetaServerEnv(
+  sucursalId: string,
+  envOverride?: Record<string, unknown>,
+): {
+  pilotAuthorized: boolean;
+  envToken: string | undefined;
+  envPageId: string | undefined;
+  envIgUserId: string | undefined;
+} {
+  const pilotAuthorized = isBranchAuthorizedForServerMetaEnv(
+    sucursalId,
+    readServerEnv("META_PILOT_BRANCH_ID", envOverride),
+  );
+  if (!pilotAuthorized) {
+    return {
+      pilotAuthorized: false,
+      envToken: undefined,
+      envPageId: undefined,
+      envIgUserId: undefined,
+    };
+  }
+
+  const rawEnvToken = readServerEnv("META_PAGE_ACCESS_TOKEN", envOverride);
+  const envToken = rawEnvToken ? sanitizeMetaAccessToken(rawEnvToken) : undefined;
+  return {
+    pilotAuthorized: true,
+    envToken: envToken || undefined,
+    envPageId: readServerEnv("META_PAGE_ID", envOverride),
+    envIgUserId: readServerEnv("META_IG_USER_ID", envOverride),
+  };
 }
 
 interface RawPostRow {
@@ -236,7 +286,7 @@ export async function publishPostOnServer(
     };
   }
 
-  const supabase = createServerSupabaseClient(envOverride);
+  const supabase = createServerSupabaseClient(envOverride, input.accessToken);
   const now = new Date();
   const nowIso = now.toISOString();
 
@@ -348,8 +398,10 @@ export async function publishPostOnServer(
   const metaIntegration =
     integrations.find((i) => i.plataforma === "Instagram_Graph_API") ?? integrations[0];
 
-  const rawEnvToken = readServerEnv("META_PAGE_ACCESS_TOKEN", envOverride);
-  const envToken = rawEnvToken ? sanitizeMetaAccessToken(rawEnvToken) : undefined;
+  const { envToken, envPageId, envIgUserId } = resolveBranchMetaServerEnv(
+    post.sucursal_id,
+    envOverride,
+  );
   const rawDbToken =
     metaIntegration?.token_cifrado &&
     !String(metaIntegration.token_cifrado).startsWith("token_")
@@ -386,17 +438,12 @@ export async function publishPostOnServer(
       : "ninguno";
   if (!accessToken) {
     const missingTokenMsg =
-      "No hay un token de Meta configurado. Define el secret META_PAGE_ACCESS_TOKEN en el servidor o guarda un token real en integraciones_sociales.";
-    await updatePostWithFallback(
-      supabase,
-      publicacionId,
-      { estado: "error", ultimo_error: missingTokenMsg },
-      { estado: "error" },
-    );
+      "Esta sucursal opera en modo Publicación Manual Asistida (sin conexión directa con Meta). Usa 'Copiar Copy', 'Descargar Imagen' y 'Marcar como publicado'.";
     return {
       ok: false,
       publicacionId,
-      status: "error",
+      status: currentStatus,
+      ...(input.fromCron === true ? { skipped: true } : {}),
       attempts: currentAttempts,
       errorMessage: missingTokenMsg,
     };
@@ -441,10 +488,8 @@ export async function publishPostOnServer(
   }
 
   try {
-    const configuredPageId =
-      metaIntegration?.page_id ?? readServerEnv("META_PAGE_ID", envOverride);
-    const configuredIgUserId =
-      metaIntegration?.ig_user_id ?? readServerEnv("META_IG_USER_ID", envOverride);
+    const configuredPageId = metaIntegration?.page_id ?? envPageId;
+    const configuredIgUserId = metaIntegration?.ig_user_id ?? envIgUserId;
 
     const credentials = await resolveMetaAccountCredentials({
       accessToken,
@@ -679,6 +724,7 @@ export const publishPostServerFn = createServerFn({ method: "POST" })
     return {
       publicacionId: data.publicacionId.trim(),
       explicitRetry: Boolean(data.explicitRetry),
+      accessToken: typeof data.accessToken === "string" ? data.accessToken.trim() || undefined : undefined,
     };
   })
   .handler(async ({ data }): Promise<PublishPostResult> => {
@@ -686,6 +732,7 @@ export const publishPostServerFn = createServerFn({ method: "POST" })
       return await publishPostOnServer({
         publicacionId: data.publicacionId,
         explicitRetry: data.explicitRetry,
+        accessToken: data.accessToken,
       });
     } catch (error: unknown) {
       const message =
@@ -701,21 +748,177 @@ export const publishPostServerFn = createServerFn({ method: "POST" })
     }
   });
 
+export interface BranchMetaStatusInput {
+  sucursalId: string;
+  accessToken?: string | undefined;
+}
+
+const DEFAULT_MANUAL_CAPABILITY: BranchMetaCapability = {
+  mode: "manual",
+  hasExpiredToken: false,
+  hasOwnToken: false,
+  usesPilotServerEnv: false,
+};
+
+/**
+ * Evalúa en el servidor si una sucursal tiene Meta autorizado (token propio en
+ * `integraciones_sociales` o inclusión en `META_PILOT_BRANCH_ID`) sin exponer secretos al cliente.
+ */
+export async function getBranchMetaStatusOnServer(
+  input: BranchMetaStatusInput,
+  envOverride?: Record<string, unknown>,
+): Promise<BranchMetaCapability> {
+  const sucursalId = input.sucursalId.trim();
+  if (!sucursalId) return DEFAULT_MANUAL_CAPABILITY;
+
+  const supabase = createServerSupabaseClient(envOverride, input.accessToken);
+  const { data: integrations } = await supabase
+    .from("integraciones_sociales")
+    .select("plataforma, token_cifrado, token_expira_en")
+    .eq("sucursal_id", sucursalId);
+
+  const { envToken } = resolveBranchMetaServerEnv(sucursalId, envOverride);
+  const rows = Array.isArray(integrations)
+    ? (integrations as unknown as RawIntegrationRow[])
+    : [];
+
+  return resolveBranchPublishMode({
+    integrations: rows,
+    pilotServerEnvEnabled: Boolean(envToken),
+  });
+}
+
+/**
+ * Server Function segura para consultar el modo de publicación efectivo de una sucursal (`meta` o `manual`).
+ */
+export const getBranchMetaStatusServerFn = createServerFn({ method: "POST" })
+  .validator((data: BranchMetaStatusInput) => {
+    if (!data || typeof data.sucursalId !== "string" || !data.sucursalId.trim()) {
+      throw new Error("Se requiere un sucursalId válido.");
+    }
+    return {
+      sucursalId: data.sucursalId.trim(),
+      accessToken: typeof data.accessToken === "string" ? data.accessToken.trim() || undefined : undefined,
+    };
+  })
+  .handler(async ({ data }): Promise<BranchMetaCapability> => {
+    try {
+      return await getBranchMetaStatusOnServer({
+        sucursalId: data.sucursalId,
+        accessToken: data.accessToken,
+      });
+    } catch {
+      return DEFAULT_MANUAL_CAPABILITY;
+    }
+  });
+
 export interface SyncMetaIntegrationInput {
   sucursalId: string;
   pageId?: string | undefined;
   igUserId?: string | undefined;
+  accessToken?: string | undefined;
 }
 
 export interface SyncMetaIntegrationResult {
   ok: boolean;
   pageId?: string | null | undefined;
   igUserId?: string | null | undefined;
+  mode?: BranchMetaCapability["mode"] | undefined;
   errorMessage?: string | undefined;
 }
 
 /**
- * Server Function para verificar el secret `META_PAGE_ACCESS_TOKEN` en el servidor,
+ * Sincroniza o valida credenciales Meta de una sucursal respetando el aislamiento
+ * multi-tenant de `META_PILOT_BRANCH_ID`.
+ */
+export async function syncMetaIntegrationOnServer(
+  data: SyncMetaIntegrationInput,
+  envOverride?: Record<string, unknown>,
+  fetchFn?: typeof fetch,
+): Promise<SyncMetaIntegrationResult> {
+  try {
+    const supabase = createServerSupabaseClient(envOverride, data.accessToken);
+    const existingRes = await supabase
+      .from("integraciones_sociales")
+      .select("*")
+      .eq("sucursal_id", data.sucursalId)
+      .maybeSingle();
+
+    const existing = existingRes.data as RawIntegrationRow | null;
+    const { envToken, envPageId, envIgUserId } = resolveBranchMetaServerEnv(
+      data.sucursalId,
+      envOverride,
+    );
+    const rawDbToken =
+      existing?.token_cifrado && !String(existing.token_cifrado).startsWith("token_")
+        ? existing.token_cifrado
+        : undefined;
+    const dbToken = rawDbToken ? sanitizeMetaAccessToken(rawDbToken) : undefined;
+    const accessToken = dbToken ?? envToken;
+
+    let resolvedPageId = data.pageId ?? existing?.page_id ?? envPageId;
+    let resolvedIgUserId = data.igUserId ?? existing?.ig_user_id ?? envIgUserId;
+
+    if (accessToken && (!resolvedPageId || !resolvedIgUserId)) {
+      const creds = await resolveMetaAccountCredentials({
+        accessToken,
+        network: resolvedIgUserId ? "Facebook" : "Instagram",
+        pageId: resolvedPageId,
+        igUserId: resolvedIgUserId,
+        fetchFn,
+      });
+      resolvedPageId = creds.pageId;
+      resolvedIgUserId = creds.igUserId ?? resolvedIgUserId;
+    }
+
+    if (!resolvedPageId && !accessToken) {
+      return {
+        ok: false,
+        errorMessage:
+          "Esta sucursal opera en Modo Manual Asistido. Para conectar Meta directo se requieren credenciales propias de Meta Business o autorizar la sucursal en META_PILOT_BRANCH_ID.",
+      };
+    }
+
+    if (existing) {
+      await supabase
+        .from("integraciones_sociales")
+        .update({
+          page_id: resolvedPageId ?? null,
+          ig_user_id: resolvedIgUserId ?? null,
+          token_expira_en: null,
+        })
+        .eq("id", existing.id);
+    } else {
+      await supabase.from("integraciones_sociales").insert([
+        {
+          sucursal_id: data.sucursalId,
+          plataforma: "Instagram_Graph_API",
+          token_cifrado: null,
+          page_id: resolvedPageId ?? null,
+          ig_user_id: resolvedIgUserId ?? null,
+          token_expira_en: null,
+        },
+      ]);
+    }
+
+    return {
+      ok: true,
+      pageId: resolvedPageId ?? null,
+      igUserId: resolvedIgUserId ?? null,
+      mode: accessToken ? "meta" : "manual",
+    };
+  } catch (err) {
+    const classified =
+      err instanceof MetaGraphApiError ? err.classified : classifyMetaGraphError(err);
+    return {
+      ok: false,
+      errorMessage: classified.userMessage,
+    };
+  }
+}
+
+/**
+ * Server Function para verificar credenciales Meta autorizadas en el servidor,
  * resolver o guardar `page_id` e `ig_user_id` en `integraciones_sociales` y reactivar la integración.
  */
 export const syncMetaIntegrationServerFn = createServerFn({ method: "POST" })
@@ -727,84 +930,9 @@ export const syncMetaIntegrationServerFn = createServerFn({ method: "POST" })
       sucursalId: data.sucursalId.trim(),
       pageId: data.pageId?.trim() || undefined,
       igUserId: data.igUserId?.trim() || undefined,
+      accessToken: typeof data.accessToken === "string" ? data.accessToken.trim() || undefined : undefined,
     };
   })
   .handler(async ({ data }): Promise<SyncMetaIntegrationResult> => {
-    try {
-      const supabase = createServerSupabaseClient();
-      const existingRes = await supabase
-        .from("integraciones_sociales")
-        .select("*")
-        .eq("sucursal_id", data.sucursalId)
-        .maybeSingle();
-
-      const existing = existingRes.data as RawIntegrationRow | null;
-      const rawEnvToken = readServerEnv("META_PAGE_ACCESS_TOKEN");
-      const envToken = rawEnvToken ? sanitizeMetaAccessToken(rawEnvToken) : undefined;
-      const rawDbToken =
-        existing?.token_cifrado && !String(existing.token_cifrado).startsWith("token_")
-          ? existing.token_cifrado
-          : undefined;
-      const dbToken = rawDbToken ? sanitizeMetaAccessToken(rawDbToken) : undefined;
-      const accessToken = envToken ?? dbToken;
-
-      let resolvedPageId =
-        data.pageId ?? existing?.page_id ?? readServerEnv("META_PAGE_ID");
-      let resolvedIgUserId =
-        data.igUserId ?? existing?.ig_user_id ?? readServerEnv("META_IG_USER_ID");
-
-      if (accessToken && (!resolvedPageId || !resolvedIgUserId)) {
-        const creds = await resolveMetaAccountCredentials({
-          accessToken,
-          network: resolvedIgUserId ? "Facebook" : "Instagram",
-          pageId: resolvedPageId,
-          igUserId: resolvedIgUserId,
-        });
-        resolvedPageId = creds.pageId;
-        resolvedIgUserId = creds.igUserId ?? resolvedIgUserId;
-      }
-
-      if (!resolvedPageId && !accessToken) {
-        return {
-          ok: false,
-          errorMessage:
-            "No se encontró el secret META_PAGE_ACCESS_TOKEN en el servidor ni un Page ID manual.",
-        };
-      }
-
-      if (existing) {
-        await supabase
-          .from("integraciones_sociales")
-          .update({
-            page_id: resolvedPageId ?? null,
-            ig_user_id: resolvedIgUserId ?? null,
-            token_expira_en: null,
-          })
-          .eq("id", existing.id);
-      } else {
-        await supabase.from("integraciones_sociales").insert([
-          {
-            sucursal_id: data.sucursalId,
-            plataforma: "Instagram_Graph_API",
-            token_cifrado: null,
-            page_id: resolvedPageId ?? null,
-            ig_user_id: resolvedIgUserId ?? null,
-            token_expira_en: null,
-          },
-        ]);
-      }
-
-      return {
-        ok: true,
-        pageId: resolvedPageId ?? null,
-        igUserId: resolvedIgUserId ?? null,
-      };
-    } catch (err) {
-      const classified =
-        err instanceof MetaGraphApiError ? err.classified : classifyMetaGraphError(err);
-      return {
-        ok: false,
-        errorMessage: classified.userMessage,
-      };
-    }
+    return await syncMetaIntegrationOnServer(data);
   });

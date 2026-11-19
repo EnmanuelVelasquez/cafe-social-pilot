@@ -25,8 +25,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { normalizeBrandKit } from "@/lib/brand";
 import { extractStoragePath, hasAffectedRows, isMissingBrandKitColumnError } from "@/lib/data";
-import { isIntegrationTokenExpired } from "@/lib/publish";
-import { syncMetaIntegrationServerFn } from "@/lib/publish-server";
+import { type BranchMetaCapability } from "@/lib/publish";
+import {
+  getBranchMetaStatusServerFn,
+  syncMetaIntegrationServerFn,
+} from "@/lib/publish-server";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { BrandKit, IntegracionSocial, Sucursal } from "@/types";
@@ -48,8 +51,8 @@ export const Route = createFileRoute("/settings")({
 const integrations = [
   {
     platform: "Instagram_Graph_API",
-    name: "Meta Graph API (Instagram/Facebook)",
-    desc: "Publica automáticamente en tu cuenta de Instagram Business y tu página de Facebook.",
+    name: "Meta Graph API (Opcional / Negocios autorizados)",
+    desc: "Publicación directa opcional en Instagram Business y página de Facebook, sujeta a autenticación y credenciales Meta autorizadas para esta sucursal.",
     icons: [Instagram, Facebook],
   },
 ];
@@ -62,13 +65,19 @@ const BRAND_COLOR_FIELDS = [
 
 function Settings() {
   const { sucursales, sucursalActiva, setSucursales, setSucursalActiva, removeSucursal } = useBranchStore();
-  const { user } = useAuthSession();
+  const { session, user } = useAuthSession();
 
   const [name, setName] = useState("");
   const [tone, setTone] = useState("");
   const [rules, setRules] = useState("");
   const [brandKit, setBrandKit] = useState<BrandKit>({});
   const [branchIntegrations, setBranchIntegrations] = useState<IntegracionSocial[]>([]);
+  const [metaCapability, setMetaCapability] = useState<BranchMetaCapability>({
+    mode: "manual",
+    hasExpiredToken: false,
+    hasOwnToken: false,
+    usesPilotServerEnv: false,
+  });
   const [pageIdInput, setPageIdInput] = useState("");
   const [igUserIdInput, setIgUserIdInput] = useState("");
   const [isSyncingMeta, setIsSyncingMeta] = useState(false);
@@ -114,6 +123,12 @@ function Settings() {
   useEffect(() => {
     if (!sucursalActiva || !supabase) {
       setBranchIntegrations([]);
+      setMetaCapability({
+        mode: "manual",
+        hasExpiredToken: false,
+        hasOwnToken: false,
+        usesPilotServerEnv: false,
+      });
       setPageIdInput("");
       setIgUserIdInput("");
       return;
@@ -133,6 +148,22 @@ function Settings() {
           setIgUserIdInput(metaRow?.ig_user_id ?? "");
         }
       });
+
+    getBranchMetaStatusServerFn({
+      data: {
+        sucursalId: sucursalActiva.id,
+        accessToken: session?.access_token,
+      },
+    })
+      .then((cap) => setMetaCapability(cap))
+      .catch(() =>
+        setMetaCapability({
+          mode: "manual",
+          hasExpiredToken: false,
+          hasOwnToken: false,
+          usesPilotServerEnv: false,
+        }),
+      );
   }, [sucursalActiva?.id]);
 
   const handleSyncMetaIntegration = async () => {
@@ -148,6 +179,7 @@ function Settings() {
           sucursalId: sucursalActiva.id,
           pageId: pageIdInput.trim() || undefined,
           igUserId: igUserIdInput.trim() || undefined,
+          accessToken: session?.access_token,
         },
       });
 
@@ -162,17 +194,30 @@ function Settings() {
       setIgUserIdInput(result.igUserId ?? "");
 
       if (supabase) {
-        const { data } = await supabase
-          .from("integraciones_sociales")
-          .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
-          .eq("sucursal_id", sucursalActiva.id);
+        const [{ data }, cap] = await Promise.all([
+          supabase
+            .from("integraciones_sociales")
+            .select("id, sucursal_id, plataforma, page_id, ig_user_id, token_expira_en")
+            .eq("sucursal_id", sucursalActiva.id),
+          getBranchMetaStatusServerFn({
+            data: {
+              sucursalId: sucursalActiva.id,
+              accessToken: session?.access_token,
+            },
+          }).catch(() => null),
+        ]);
         if (data) {
           setBranchIntegrations(data as IntegracionSocial[]);
+        }
+        if (cap) {
+          setMetaCapability(cap);
         }
       }
 
       toast.success(
-        `Integración con Meta verificada${result.pageId ? ` (Page ID: ${result.pageId})` : ""}`,
+        result.mode === "meta"
+          ? `Integración con Meta verificada${result.pageId ? ` (Page ID: ${result.pageId})` : ""}`
+          : "IDs guardados. Esta sucursal sigue operando en Modo Manual Asistido hasta vincular un token Meta autorizado.",
       );
     } catch (error: any) {
       toast.error(
@@ -600,11 +645,35 @@ function Settings() {
         </TabsContent>
 
         <TabsContent value="integraciones" className="grid gap-4 md:grid-cols-2">
+          <Card className="shadow-card">
+            <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+              <div className="flex gap-1.5">
+                <div className="grid h-10 w-10 place-items-center rounded-xl bg-success-soft text-success">
+                  <CheckCircle2 className="h-5 w-5" />
+                </div>
+              </div>
+              <Badge variant="published">Activo por defecto</Badge>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <CardTitle className="font-display text-base">
+                Publicación Manual Asistida
+              </CardTitle>
+              <CardDescription>
+                Flujo principal sin depender de permisos externos: genera tu parrilla con IA, copia el texto en 1 clic, descarga la imagen optimizada y marca cada pieza como publicada al subirla a tus redes.
+              </CardDescription>
+            </CardContent>
+          </Card>
+
           {integrations.map((it) => {
-            const record = branchIntegrations.find((b) => b.plataforma === it.platform);
-            const isExpired = isIntegrationTokenExpired(record);
-            const isConnected =
-              Boolean(record?.page_id || record?.ig_user_id) && !isExpired;
+            const isExpired = metaCapability.hasExpiredToken;
+            const isConnected = metaCapability.mode === "meta" && !isExpired;
+            const statusLabel = isExpired
+              ? "Token Expirado (190)"
+              : metaCapability.usesPilotServerEnv
+                ? "Conectado (Piloto)"
+                : metaCapability.hasOwnToken
+                  ? "Conectado"
+                  : "No vinculado (Opcional)";
             return (
               <Card key={it.name} className="shadow-card">
                 <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
@@ -618,11 +687,7 @@ function Settings() {
                       isExpired ? "error" : isConnected ? "published" : "secondary"
                     }
                   >
-                    {isExpired
-                      ? "Token Expirado (190)"
-                      : isConnected
-                        ? "Conectado (Etapa 1)"
-                        : "Modo Etapa 1 (Server Secret)"}
+                    {statusLabel}
                   </Badge>
                 </CardHeader>
                 <CardContent className="space-y-3">
