@@ -1,5 +1,6 @@
 export interface Perfil {
   id: string;
+  user_id?: string | null | undefined;
   nombre: string;
   created_at?: string;
 }

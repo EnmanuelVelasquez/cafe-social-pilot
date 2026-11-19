@@ -3,6 +3,7 @@ import "./lib/error-capture";
 import { consumeLastCapturedError } from "./lib/error-capture";
 import { renderErrorPage } from "./lib/error-page";
 import { publishDuePostsOnServer } from "./lib/publish-server";
+import { authorizeCronRequest, resolveConfiguredCronSecret } from "./lib/security";
 
 type ServerEntry = {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response> | Response;
@@ -45,27 +46,6 @@ function isH3SwallowedErrorBody(body: string): boolean {
   }
 }
 
-function isAuthorizedCronRequest(
-  request: Request,
-  envRecord?: Record<string, unknown>,
-): boolean {
-  const configuredSecret =
-    (envRecord && typeof envRecord["CRON_SECRET"] === "string"
-      ? envRecord["CRON_SECRET"].trim()
-      : undefined) ||
-    (typeof process !== "undefined" && process.env?.["CRON_SECRET"]
-      ? process.env["CRON_SECRET"].trim()
-      : undefined);
-
-  if (!configuredSecret) return true;
-
-  const authHeader = request.headers.get("authorization") ?? "";
-  const cronHeader = request.headers.get("x-cron-secret") ?? "";
-  return (
-    authHeader === `Bearer ${configuredSecret}` || cronHeader === configuredSecret
-  );
-}
-
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
@@ -73,12 +53,14 @@ export default {
       if (url.pathname === "/api/cron/publish-due") {
         const envRecord =
           env && typeof env === "object" ? (env as Record<string, unknown>) : undefined;
+        const configuredSecret = resolveConfiguredCronSecret(envRecord);
+        const authResult = authorizeCronRequest(request.headers, configuredSecret);
 
-        if (!isAuthorizedCronRequest(request, envRecord)) {
+        if (!authResult.authorized) {
           return new Response(
-            JSON.stringify({ ok: false, error: "No autorizado (CRON_SECRET inválido)." }),
+            JSON.stringify({ ok: false, error: authResult.error }),
             {
-              status: 401,
+              status: authResult.status,
               headers: { "content-type": "application/json; charset=utf-8" },
             },
           );

@@ -69,6 +69,7 @@ import {
   normalizePublishStatus,
 } from "@/lib/publish";
 import { publishPostServerFn } from "@/lib/publish-server";
+import { normalizeSocialNetworkLabel } from "@/lib/security";
 import { useBranchStore } from "@/lib/store";
 import { supabase } from "@/lib/supabase";
 import type { PublishStatus } from "@/types";
@@ -266,7 +267,7 @@ function Dashboard() {
               when: formatScheduledDateLabel(isoDate),
               scheduledAtIso: isoDate,
               publishedAtIso: d.publicado_en ?? null,
-              network: d.red_social || "Instagram",
+              network: normalizeSocialNetworkLabel(d.red_social),
               status: normalizePublishStatus(d.estado),
               img: d.activos?.url_imagen || "",
               pillar: d.activos?.tags || "General",
