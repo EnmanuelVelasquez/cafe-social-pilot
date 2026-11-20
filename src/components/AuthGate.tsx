@@ -7,10 +7,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useRouterState } from "@tanstack/react-router";
 import type { Session, User } from "@supabase/supabase-js";
 import { Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { AuthScreen } from "@/components/AuthScreen";
+import { LandingPage } from "@/components/LandingPage";
 import {
   ensureUserPerfil,
   shouldResetBranchStoreOnAuthChange,
@@ -44,6 +46,8 @@ export function useAuthSession(): AuthSessionContextValue {
  * sin sesión activa muestra `AuthScreen` y limpia el store de sucursales al cambiar de usuario.
  */
 export function AuthGate({ children }: { children: ReactNode }) {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const isPublicLandingRoute = pathname === "/landing";
   const [session, setSession] = useState<Session | null>(null);
   const [isChecking, setIsChecking] = useState<boolean>(Boolean(supabase));
   const previousUserIdRef = useRef<string | null>(null);
@@ -122,6 +126,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
     );
   }
 
+  if (isPublicLandingRoute) {
+    return (
+      <AuthSessionContext.Provider
+        value={{
+          session,
+          user: session?.user ?? null,
+          isDemoMode: !supabase,
+          signOut,
+        }}
+      >
+        {children}
+      </AuthSessionContext.Provider>
+    );
+  }
+
   if (isChecking) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-background">
@@ -134,6 +153,20 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   if (!session) {
+    if (pathname === "/") {
+      return (
+        <AuthSessionContext.Provider
+          value={{
+            session: null,
+            user: null,
+            isDemoMode: false,
+            signOut,
+          }}
+        >
+          <LandingPage isAuthenticated={false} />
+        </AuthSessionContext.Provider>
+      );
+    }
     return <AuthScreen />;
   }
 
