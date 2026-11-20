@@ -364,7 +364,7 @@ function Activos() {
       const formatted = formatTagsString(detectedTags.join(", "));
       setEditingTags((prev) => (prev ? { ...prev, draft: formatted } : prev));
       if (source === "gemini") {
-        toast.success("Etiquetas generadas con Gemini Vision (gemini-3.8-flash)");
+        toast.success("Etiquetas generadas con IA Vision");
       } else {
         toast.success("Etiquetas generadas por Webhook IA");
       }

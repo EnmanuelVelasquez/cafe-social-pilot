@@ -52,7 +52,9 @@ import {
   MAX_POST_COPY_LENGTH,
   SUPPORTED_SOCIAL_NETWORKS,
   assets as sampleAssets,
+  countPostTabs,
   countPublishedThisMonth,
+  filterPostsByTab,
   formatScheduledDateLabel,
   hasAffectedRows,
   isZeroInventory,
@@ -61,6 +63,7 @@ import {
   toDatetimeLocalInputValue,
   validatePostEditPayload,
   type Asset,
+  type PostFilterTab,
   type SocialNetwork,
 } from "@/lib/data";
 import {
@@ -160,6 +163,7 @@ function Dashboard() {
   const [markingPublishedId, setMarkingPublishedId] = useState<string | null>(null);
   const [deletingPostId, setDeletingPostId] = useState<string | null>(null);
   const [auto, setAuto] = useState(false);
+  const [postTab, setPostTab] = useState<PostFilterTab>("all");
   const [editing, setEditing] = useState<EditingPostState | null>(null);
 
   useEffect(() => {
@@ -309,6 +313,8 @@ function Dashboard() {
 
   const scheduled = posts.filter((p) => p.status === "programado").length;
   const publishedThisMonth = countPublishedThisMonth(posts);
+  const tabCounts = countPostTabs(posts);
+  const visiblePosts = filterPostsByTab(posts, postTab);
   const zeroInventory = !isLoading && isZeroInventory(branchAssets);
   const igQuotaStatus = checkInstagramDailyQuota(posts);
 
@@ -357,7 +363,7 @@ function Dashboard() {
       const scheduledIso = scheduledDate.toISOString();
       const providerBadge =
         provider === "gemini"
-          ? " con Gemini (gemini-3.8-flash)"
+          ? " con IA"
           : " vía Webhook IA";
 
       if (!supabase) {
@@ -921,7 +927,7 @@ function Dashboard() {
   if (!sucursalActiva) {
     return (
       <AppShell
-        title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>}
+        title={<span className="text-cta">AutoSocial AI - Panel de Contenido</span>}
         subtitle="Próximas publicaciones generadas por IA"
       >
         <div className="flex min-h-[50vh] items-center justify-center">
@@ -944,7 +950,7 @@ function Dashboard() {
 
   return (
     <AppShell
-      title={<span className="text-cta">AutoSocial AI - Panel de Control Automático</span>}
+      title={<span className="text-cta">AutoSocial AI - Panel de Contenido</span>}
       subtitle={`${sucursalActiva.nombre} · Próximas publicaciones generadas por IA`}
       action={
         <Button
@@ -966,7 +972,7 @@ function Dashboard() {
           </AlertTitle>
           <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
             <span>
-              Esta sucursal no tiene imágenes disponibles. Por seguridad, el bot detiene la generación para nunca publicar texto suelto en Meta.
+              Esta sucursal no tiene imágenes disponibles. Por seguridad, el bot detiene la generación para nunca generar publicaciones sin respaldo visual.
             </span>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" asChild>
@@ -1062,18 +1068,48 @@ function Dashboard() {
         </label>
       </div>
 
-      <h2 className="mb-3 mt-8 font-display text-lg font-semibold">Próximas publicaciones</h2>
+      <div className="mb-3 mt-8 flex flex-wrap items-center justify-between gap-3">
+        <h2 className="font-display text-lg font-semibold">Publicaciones</h2>
+        <div className="flex flex-wrap gap-1.5" role="tablist" aria-label="Filtrar publicaciones">
+          {(
+            [
+              { id: "all", label: "Todas", count: tabCounts.all },
+              { id: "active", label: "Por publicar", count: tabCounts.active },
+              { id: "published", label: "Publicadas", count: tabCounts.published },
+            ] as const
+          ).map((tabOption) => {
+            const selected = postTab === tabOption.id;
+            return (
+              <button
+                key={tabOption.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setPostTab(tabOption.id)}
+                className={`rounded-full border px-3 py-1 text-xs font-medium transition ${
+                  selected
+                    ? "border-primary bg-primary-soft text-primary"
+                    : "bg-card text-muted-foreground hover:bg-muted"
+                }`}
+              >
+                {tabOption.label} ({tabOption.count})
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="space-y-3">
-        {posts.map((p) => {
+        {visiblePosts.map((p) => {
           const badge = getStatusBadgeProps(p.status);
           const isPublishingThis = publishingPostId === p.id || p.status === "publicando";
           const isMarkingThis = markingPublishedId === p.id;
           const isBusy = isPublishingThis || isMarkingThis;
           const articleClasses =
             p.status === "pendiente"
-              ? "border border-warning bg-warning-soft"
+              ? "border border-warning/60 border-l-4 border-l-warning bg-card"
               : p.status === "error"
-                ? "border border-destructive/40 bg-card"
+                ? "border border-destructive/40 border-l-4 border-l-destructive bg-card"
                 : "border bg-card";
 
           return (
@@ -1087,180 +1123,196 @@ function Dashboard() {
                 loading="lazy"
                 width={816}
                 height={816}
-                className="aspect-square w-full rounded-xl object-cover sm:w-28"
+                className="aspect-square max-h-56 w-full shrink-0 self-start rounded-xl object-cover sm:h-32 sm:w-32"
               />
-              <div className="min-w-0 flex-1">
-                <div className="flex flex-wrap items-center gap-2 text-xs font-medium">
-                  <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1">
-                    {p.network === "Instagram" ? (
-                      <Instagram className="h-3.5 w-3.5 text-violet" />
-                    ) : (
-                      <Facebook className="h-3.5 w-3.5 text-primary" />
-                    )}
-                    {p.network}
-                  </span>
-                  <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1">
-                    <Clock className="h-3.5 w-3.5" />
-                    {p.when}
-                  </span>
-                  <span className="rounded-full bg-violet-soft px-2.5 py-1 text-violet">
-                    {p.pillar}
-                  </span>
-                  <Badge variant={badge.variant} className="rounded-full px-2.5 py-1">
-                    {p.status === "publicando" && (
-                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                    )}
-                    {badge.label}
-                  </Badge>
-                  {p.externalId && (
-                    <span className="rounded-full bg-success-soft px-2.5 py-1 text-success">
-                      ID Meta: {p.externalId}
+              <div className="flex min-w-0 flex-1 flex-col justify-between gap-4">
+                <div>
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-medium">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1">
+                      {p.network === "Instagram" ? (
+                        <Instagram className="h-3.5 w-3.5 text-violet" />
+                      ) : (
+                        <Facebook className="h-3.5 w-3.5 text-primary" />
+                      )}
+                      {p.network}
                     </span>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1">
+                      <Clock className="h-3.5 w-3.5" />
+                      {p.when}
+                    </span>
+                    <span className="rounded-full bg-violet-soft px-2.5 py-1 text-violet">
+                      {p.pillar}
+                    </span>
+                    <Badge variant={badge.variant} className="rounded-full px-2.5 py-1">
+                      {p.status === "publicando" && (
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                      )}
+                      {badge.label}
+                    </Badge>
+                    {p.externalId && (
+                      <span className="rounded-full bg-success-soft px-2.5 py-1 text-success">
+                        ID Meta: {p.externalId}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-3 text-sm leading-relaxed text-foreground">{p.copy}</p>
+
+                  {p.status === "error" && (
+                    <div
+                      role="alert"
+                      className="mt-3 flex flex-col gap-1 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive"
+                    >
+                      <div className="flex items-center justify-between gap-2 font-semibold">
+                        <span className="inline-flex items-center gap-1.5">
+                          <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
+                          Detalle del error en Meta Graph API
+                        </span>
+                        {typeof p.attempts === "number" && p.attempts > 0 && (
+                          <span>
+                            Intentos: {p.attempts}/{MAX_PUBLISH_ATTEMPTS}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-foreground/90">
+                        {p.lastError ||
+                          "No se pudo publicar en Meta. Revisa la conexión o marca como publicada manualmente."}
+                      </p>
+                    </div>
                   )}
                 </div>
-                <p className="mt-3 text-sm leading-relaxed">{p.copy}</p>
 
-                {p.status === "error" && (
-                  <div
-                    role="alert"
-                    className="mt-3 flex flex-col gap-1 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive"
-                  >
-                    <div className="flex items-center justify-between gap-2 font-semibold">
-                      <span className="inline-flex items-center gap-1.5">
-                        <TriangleAlert className="h-3.5 w-3.5 shrink-0" />
-                        Detalle del error en Meta Graph API
-                      </span>
-                      {typeof p.attempts === "number" && p.attempts > 0 && (
-                        <span>
-                          Intentos: {p.attempts}/{MAX_PUBLISH_ATTEMPTS}
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-foreground/90">
-                      {p.lastError ||
-                        "No se pudo publicar en Meta. Revisa la conexión o pulsa Reintentar."}
-                    </p>
-                  </div>
-                )}
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2 self-start sm:self-center">
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="Copiar Copy"
-                  onClick={() => handleCopyText(p.copy)}
-                >
-                  <Copy className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="Descargar Imagen"
-                  onClick={() => handleDownloadImage(p.img)}
-                >
-                  <Download className="h-4 w-4" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  title="Eliminar publicación"
-                  disabled={deletingPostId === p.id || isBusy}
-                  onClick={() => handleDeletePost(p.id)}
-                >
-                  {deletingPostId === p.id ? (
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  ) : (
-                    <Trash2 className="h-4 w-4 text-destructive" />
-                  )}
-                </Button>
-
-                {p.status === "pendiente" && (
-                  <>
-                    <Button variant="brand" disabled={isBusy} onClick={() => approve(p.id)}>
-                      <CheckCircle2 /> Aprobar y Programar
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      title="Copiar texto del copy"
+                      onClick={() => handleCopyText(p.copy)}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                      Copiar copy
                     </Button>
                     <Button
                       variant="outline"
-                      disabled={isBusy}
-                      onClick={() => handleMarkAsPublished(p.id)}
+                      size="sm"
+                      title="Descargar imagen optimizada"
+                      onClick={() => handleDownloadImage(p.img)}
                     >
-                      {isMarkingThis ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <CheckCircle2 />
-                      )}
-                      {isMarkingThis ? "Guardando..." : "Marcar publicado"}
+                      <Download className="h-3.5 w-3.5" />
+                      Imagen
                     </Button>
-                  </>
-                )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="px-2 text-muted-foreground hover:text-destructive"
+                      title="Eliminar publicación"
+                      aria-label="Eliminar publicación"
+                      disabled={deletingPostId === p.id || isBusy}
+                      onClick={() => handleDeletePost(p.id)}
+                    >
+                      {deletingPostId === p.id ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-4 w-4" />
+                      )}
+                    </Button>
+                  </div>
 
-                {p.status === "programado" && (
-                  <>
-                    {hasActiveIntegration && (
-                      <Button
-                        variant="cta"
-                        disabled={isBusy}
-                        onClick={() => handlePublishPost(p.id, { explicitRetry: false })}
-                      >
-                        {isPublishingThis ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <Send />
+                  <div className="flex flex-wrap items-center gap-2">
+                    {p.status === "pendiente" && (
+                      <>
+                        <Button variant="brand" size="sm" disabled={isBusy} onClick={() => approve(p.id)}>
+                          <CheckCircle2 /> Aprobar y Programar
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() => handleMarkAsPublished(p.id)}
+                        >
+                          {isMarkingThis ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 />
+                          )}
+                          {isMarkingThis ? "Guardando..." : "Marcar publicado"}
+                        </Button>
+                      </>
+                    )}
+
+                    {p.status === "programado" && (
+                      <>
+                        {hasActiveIntegration && (
+                          <Button
+                            variant="cta"
+                            size="sm"
+                            disabled={isBusy}
+                            onClick={() => handlePublishPost(p.id, { explicitRetry: false })}
+                          >
+                            {isPublishingThis ? (
+                              <Loader2 className="animate-spin" />
+                            ) : (
+                              <Send />
+                            )}
+                            {isPublishingThis ? "Publicando..." : "Publicar ahora (Meta)"}
+                          </Button>
                         )}
-                        {isPublishingThis ? "Publicando..." : "Publicar ahora (Meta)"}
+                        <Button
+                          variant={hasActiveIntegration ? "outline" : "brand"}
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() => handleMarkAsPublished(p.id)}
+                        >
+                          {isMarkingThis ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 />
+                          )}
+                          {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
+                        </Button>
+                      </>
+                    )}
+
+                    {p.status === "error" && (
+                      <>
+                        {hasActiveIntegration && (
+                          <Button
+                            variant="cta"
+                            size="sm"
+                            disabled={isBusy}
+                            onClick={() => handlePublishPost(p.id, { explicitRetry: true })}
+                          >
+                            {isPublishingThis ? (
+                              <Loader2 className="animate-spin" />
+                            ) : (
+                              <RotateCcw />
+                            )}
+                            Reintentar
+                          </Button>
+                        )}
+                        <Button
+                          variant={hasActiveIntegration ? "outline" : "brand"}
+                          size="sm"
+                          disabled={isBusy}
+                          onClick={() => handleMarkAsPublished(p.id)}
+                        >
+                          {isMarkingThis ? (
+                            <Loader2 className="animate-spin" />
+                          ) : (
+                            <CheckCircle2 />
+                          )}
+                          {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
+                        </Button>
+                      </>
+                    )}
+
+                    {p.status !== "publicado" && p.status !== "publicando" && (
+                      <Button variant="outline" size="sm" disabled={isBusy} onClick={() => openEdit(p.id)}>
+                        <Pencil /> {p.status === "pendiente" ? "Editar" : "Reprogramar"}
                       </Button>
                     )}
-                    <Button
-                      variant={hasActiveIntegration ? "outline" : "brand"}
-                      disabled={isBusy}
-                      onClick={() => handleMarkAsPublished(p.id)}
-                    >
-                      {isMarkingThis ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <CheckCircle2 />
-                      )}
-                      {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
-                    </Button>
-                  </>
-                )}
-
-                {p.status === "error" && (
-                  <>
-                    {hasActiveIntegration && (
-                      <Button
-                        variant="cta"
-                        disabled={isBusy}
-                        onClick={() => handlePublishPost(p.id, { explicitRetry: true })}
-                      >
-                        {isPublishingThis ? (
-                          <Loader2 className="animate-spin" />
-                        ) : (
-                          <RotateCcw />
-                        )}
-                        Reintentar
-                      </Button>
-                    )}
-                    <Button
-                      variant={hasActiveIntegration ? "outline" : "brand"}
-                      disabled={isBusy}
-                      onClick={() => handleMarkAsPublished(p.id)}
-                    >
-                      {isMarkingThis ? (
-                        <Loader2 className="animate-spin" />
-                      ) : (
-                        <CheckCircle2 />
-                      )}
-                      {isMarkingThis ? "Guardando..." : "Marcar como publicado"}
-                    </Button>
-                  </>
-                )}
-
-                {p.status !== "publicado" && p.status !== "publicando" && (
-                  <Button variant="outline" disabled={isBusy} onClick={() => openEdit(p.id)}>
-                    <Pencil /> {p.status === "pendiente" ? "Editar" : "Reprogramar"}
-                  </Button>
-                )}
+                  </div>
+                </div>
               </div>
             </article>
           );
@@ -1268,16 +1320,24 @@ function Dashboard() {
         {isLoading && (
           <p className="py-4 text-sm text-muted-foreground">Cargando publicaciones...</p>
         )}
-        {!isLoading && posts.length === 0 && (
+        {!isLoading && visiblePosts.length === 0 && (
           <div className="rounded-2xl border border-dashed bg-card p-8 text-center">
             <p className="text-sm text-muted-foreground">
-              No hay publicaciones para esta sucursal todavía.
+              {posts.length === 0
+                ? "No hay publicaciones para esta sucursal todavía."
+                : postTab === "active"
+                  ? "No hay publicaciones pendientes ni programadas en este momento."
+                  : "Aún no hay publicaciones marcadas como publicadas."}
             </p>
-            {!zeroInventory && (
+            {posts.length > 0 && postTab !== "all" ? (
+              <Button variant="outline" className="mt-4" onClick={() => setPostTab("all")}>
+                Ver todas las publicaciones
+              </Button>
+            ) : !zeroInventory ? (
               <Button variant="outline" className="mt-4" onClick={handleGeneratePost} disabled={isGenerating}>
                 <Sparkles className="h-4 w-4" /> Generar la primera publicación con IA
               </Button>
-            )}
+            ) : null}
           </div>
         )}
       </div>
