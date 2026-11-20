@@ -11,6 +11,8 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ActivosRouteImport } from './routes/activos'
+import { Route as LandingRouteImport } from './routes/landing'
+import { Route as LoginRouteImport } from './routes/login'
 import { Route as MarcaRouteImport } from './routes/marca'
 import { Route as SettingsRouteImport } from './routes/settings'
 
@@ -22,6 +24,16 @@ const IndexRoute = IndexRouteImport.update({
 const ActivosRoute = ActivosRouteImport.update({
   id: '/activos',
   path: '/activos',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LandingRoute = LandingRouteImport.update({
+  id: '/landing',
+  path: '/landing',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const LoginRoute = LoginRouteImport.update({
+  id: '/login',
+  path: '/login',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MarcaRoute = MarcaRouteImport.update({
@@ -38,12 +50,16 @@ const SettingsRoute = SettingsRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/activos': typeof ActivosRoute
+  '/landing': typeof LandingRoute
+  '/login': typeof LoginRoute
   '/marca': typeof MarcaRoute
   '/settings': typeof SettingsRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/activos': typeof ActivosRoute
+  '/landing': typeof LandingRoute
+  '/login': typeof LoginRoute
   '/marca': typeof MarcaRoute
   '/settings': typeof SettingsRoute
 }
@@ -51,20 +67,31 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/activos': typeof ActivosRoute
+  '/landing': typeof LandingRoute
+  '/login': typeof LoginRoute
   '/marca': typeof MarcaRoute
   '/settings': typeof SettingsRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/activos' | '/marca' | '/settings'
+  fullPaths: '/' | '/activos' | '/landing' | '/login' | '/marca' | '/settings'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/activos' | '/marca' | '/settings'
-  id: '__root__' | '/' | '/activos' | '/marca' | '/settings'
+  to: '/' | '/activos' | '/landing' | '/login' | '/marca' | '/settings'
+  id:
+    | '__root__'
+    | '/'
+    | '/activos'
+    | '/landing'
+    | '/login'
+    | '/marca'
+    | '/settings'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   ActivosRoute: typeof ActivosRoute
+  LandingRoute: typeof LandingRoute
+  LoginRoute: typeof LoginRoute
   MarcaRoute: typeof MarcaRoute
   SettingsRoute: typeof SettingsRoute
 }
@@ -83,6 +110,20 @@ declare module '@tanstack/react-router' {
       path: '/activos'
       fullPath: '/activos'
       preLoaderRoute: typeof ActivosRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/landing': {
+      id: '/landing'
+      path: '/landing'
+      fullPath: '/landing'
+      preLoaderRoute: typeof LandingRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/login': {
+      id: '/login'
+      path: '/login'
+      fullPath: '/login'
+      preLoaderRoute: typeof LoginRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/marca': {
@@ -105,6 +146,8 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   ActivosRoute: ActivosRoute,
+  LandingRoute: LandingRoute,
+  LoginRoute: LoginRoute,
   MarcaRoute: MarcaRoute,
   SettingsRoute: SettingsRoute,
 }

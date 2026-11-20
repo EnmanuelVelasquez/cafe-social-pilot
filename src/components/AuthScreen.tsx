@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { Loader2, Lock, Mail, ShieldCheck, Zap } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ArrowLeft, Loader2, Lock, Mail, ShieldCheck, Zap } from "lucide-react";
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -168,6 +169,14 @@ export function AuthScreen() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-background px-4 py-10">
+      <div className="mb-4 flex w-full max-w-md justify-start">
+        <Button variant="ghost" size="sm" asChild className="text-muted-foreground">
+          <Link to="/landing">
+            <ArrowLeft className="h-4 w-4" />
+            Conoce AutoSocial AI
+          </Link>
+        </Button>
+      </div>
       <div className="mb-6 flex items-center gap-2.5">
         <div className="grid h-10 w-10 place-items-center rounded-xl bg-brand shadow-glow">
           <Zap className="h-5 w-5 text-primary-foreground" />
