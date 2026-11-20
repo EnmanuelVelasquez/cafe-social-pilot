@@ -402,10 +402,54 @@ export function validatePostEditPayload(input: {
   };
 }
 
+export type PostFilterTab = "all" | "active" | "published";
+
+/**
+ * Indica si un estado representa una publicación ya finalizada (`publicado` / `publicada`).
+ */
+export function isPublishedPostStatus(status: string | null | undefined): boolean {
+  const normalizedStatus = (status ?? "").trim().toLowerCase();
+  return normalizedStatus === "publicado" || normalizedStatus === "publicada";
+}
+
+/**
+ * Calcula los totales para las pestañas de filtrado de publicaciones del Dashboard.
+ */
+export function countPostTabs<T extends { status: string }>(
+  list: ReadonlyArray<T>,
+): { all: number; active: number; published: number } {
+  let published = 0;
+  for (const item of list) {
+    if (isPublishedPostStatus(item.status)) {
+      published += 1;
+    }
+  }
+  return {
+    all: list.length,
+    active: list.length - published,
+    published,
+  };
+}
+
+/**
+ * Filtra la lista de publicaciones según el filtro activo (`all`, `active`, `published`).
+ */
+export function filterPostsByTab<T extends { status: string }>(
+  list: ReadonlyArray<T>,
+  tab: PostFilterTab,
+): T[] {
+  if (tab === "all") return [...list];
+  if (tab === "published") {
+    return list.filter((item) => isPublishedPostStatus(item.status));
+  }
+  return list.filter((item) => !isPublishedPostStatus(item.status));
+}
+
 /**
  * Cuenta cuántas publicaciones de la sucursal tienen estado `publicado` / `publicada`
  * dentro del mes y año de referencia (`now`). Si no hay ninguna, devuelve `0`.
- */export function countPublishedThisMonth(
+ */
+export function countPublishedThisMonth(
   list: ReadonlyArray<{
     status: string;
     scheduledAtIso?: string | null | undefined;
@@ -417,8 +461,7 @@ export function validatePostEditPayload(input: {
   const targetMonth = now.getMonth();
 
   return list.filter((item) => {
-    const normalizedStatus = item.status.trim().toLowerCase();
-    if (normalizedStatus !== "publicado" && normalizedStatus !== "publicada") {
+    if (!isPublishedPostStatus(item.status)) {
       return false;
     }
     const refIso = item.publishedAtIso || item.scheduledAtIso;

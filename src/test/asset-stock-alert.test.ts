@@ -6,13 +6,16 @@ import {
   MAX_POST_COPY_LENGTH,
   MIN_ASSET_DIMENSION_PX,
   assets,
+  countPostTabs,
   countPublishedThisMonth,
   countUnused,
   extractStoragePath,
+  filterPostsByTab,
   formatTagsString,
   hasAffectedRows,
   inferTagsFromFilename,
   isLowStock,
+  isPublishedPostStatus,
   isZeroInventory,
   parseDatetimeLocalToIso,
   parseTags,
@@ -236,5 +239,44 @@ describe("Validación de dimensiones y relación de aspecto para Meta Graph API 
     // Proporción 2:3 (ratio 0.6667, fuera tanto de Stories 9:16 como de Feed 4:5)
     const twoByThree = validateImageDimensions(1000, 1500);
     expect(twoByThree.valid).toBe(false);
+  });
+});
+
+describe("Filtros de estado del Dashboard (Todas / Por publicar / Publicadas)", () => {
+  it("calcula los contadores de pestañas y filtra correctamente sin mutar el arreglo original", () => {
+    const sample = [
+      { id: "1", status: "pendiente" },
+      { id: "2", status: "programado" },
+      { id: "3", status: "error" },
+      { id: "4", status: "publicado" },
+      { id: "5", status: "publicada" },
+    ];
+
+    expect(isPublishedPostStatus("publicado")).toBe(true);
+    expect(isPublishedPostStatus("PUBLICADA")).toBe(true);
+    expect(isPublishedPostStatus("programado")).toBe(false);
+
+    expect(countPostTabs(sample)).toEqual({
+      all: 5,
+      active: 3,
+      published: 2,
+    });
+
+    expect(filterPostsByTab(sample, "all").map((p) => p.id)).toEqual([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+    ]);
+    expect(filterPostsByTab(sample, "active").map((p) => p.id)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+    expect(filterPostsByTab(sample, "published").map((p) => p.id)).toEqual([
+      "4",
+      "5",
+    ]);
   });
 });
